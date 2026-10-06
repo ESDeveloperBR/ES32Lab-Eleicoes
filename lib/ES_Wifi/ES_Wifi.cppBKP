@@ -1,0 +1,206 @@
+#include "ES_Wifi.h"
+
+ES_WiFi::ES_WiFi(const char* ssid, const char* password) {
+    _ssid = ssid;
+    _password = password;
+}
+
+/*
+bool ES_WiFi::connect() {
+    WiFi.begin(_ssid, _password);
+    return WiFi.waitForConnectResult() == WL_CONNECTED;
+}
+*/
+
+// <<< Método Begin >>>
+bool ES_WiFi::begin(const JsonVariantConst& jsonNetwork) {
+    Serial.println("GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG");
+    serializeJson(jsonNetwork, Serial); // Veja o que está chegando
+
+    Serial.println("=============== setupWiFi ===============");
+    
+    // Verifica se o módulo de rede está habilitado
+    if (!jsonNetwork["enable"].as<bool>()) {
+        Serial.println("Módulo de rede desabilitado no JSON - WiFi não será iniciado");
+        return false;
+    }
+    String hostName     = jsonNetwork["hostName"].as<String>();
+    bool softAPEnabled  = jsonNetwork["softAP"]["enable"].as<bool>();
+    bool wifiConnected  = false;
+
+    if (softAPEnabled) {
+        // --- Configuração do SoftAP | SoftAP Configuration ---
+        String apSSID     = jsonNetwork["softAP"]["ssid"].as<String>();
+        String apPassword = jsonNetwork["softAP"]["password"].as<String>();
+
+        Serial.println("Iniciando modo SoftAP...");
+        WiFi.mode(WIFI_AP);
+
+        // Definir hostname para SoftAP (opcional, nem todos os sistemas usam)
+        if (!hostName.isEmpty()) {
+            WiFi.softAPsetHostname(hostName.c_str());
+            Serial.print("Hostname do SoftAP definido como: ");
+            Serial.println(hostName);
+        }
+        
+        if (WiFi.softAP(apSSID.c_str(), apPassword.c_str())) {
+            Serial.println("SoftAP iniciado com sucesso!");
+            Serial.print("SSID: ");
+            Serial.println(apSSID);
+            Serial.print("IP do SoftAP: ");
+            Serial.println(WiFi.softAPIP());
+            wifiConnected = true;
+        } else {
+            Serial.println("Falha ao iniciar SoftAP");
+            return false;
+        }
+        
+    } else {
+
+
+
+
+        // --- Configuração do WiFi Station | WiFi Station Configuration ---
+        String ssid     = jsonNetwork["wifi"][0]["ssid"].as<String>();
+        String password = jsonNetwork["wifi"][0]["password"].as<String>();
+        String staticIP = jsonNetwork["ip"].as<String>();
+        String gateway  = jsonNetwork["gateway"].as<String>();
+        String mask     = jsonNetwork["mask"].as<String>();
+        String dns1     = jsonNetwork["dns1"].as<String>();
+        String dns2     = jsonNetwork["dns2"].as<String>();
+
+        if (ssid.isEmpty()) {
+            Serial.println("SSID não configurado no JSON");
+            return false;
+        }
+        
+        Serial.print("Conectando ao WiFi: ");
+        Serial.println(ssid);
+        
+        WiFi.mode(WIFI_STA);
+
+        // Definir hostname para Station
+        if (!hostName.isEmpty()) {
+            WiFi.setHostname(hostName.c_str());
+            Serial.print("Hostname definido como: ");
+            Serial.println(hostName);
+        }        
+        
+        // Configure static IP if provided (IP não vazio) | Configura IP estático se fornecido (IP não vazio)
+        if (!staticIP.isEmpty()) {
+            IPAddress ip, gw, subnet, dns_primary, dns_secondary;
+            
+            ip.fromString(staticIP);
+            subnet.fromString(mask.isEmpty() ? "255.255.255.0" : mask);
+            
+            // Se gateway estiver vazio, usa o IP da rede + .1 como padrão
+            if (gateway.isEmpty()) {
+                // Extrai os 3 primeiros octetos do IP e adiciona .1
+                int lastDot = staticIP.lastIndexOf('.');
+                if (lastDot > 0) {
+                    gateway = staticIP.substring(0, lastDot) + ".1";
+                }
+            }
+            gw.fromString(gateway);
+            
+            dns_primary.fromString(dns1.isEmpty() ? "8.8.8.8" : dns1);
+            dns_secondary.fromString(dns2.isEmpty() ? "8.8.4.4" : dns2);
+            
+            Serial.println("Configurando IP estático:");
+            Serial.println("IP: "      + staticIP);
+            Serial.println("Gateway: " + gateway);
+            Serial.println("Máscara: " + (mask.isEmpty() ? "255.255.255.0" : mask));
+            Serial.println("DNS1: "    + (dns1.isEmpty() ? "8.8.8.8" : dns1));
+            Serial.println("DNS2: "    + (dns2.isEmpty() ? "8.8.4.4" : dns2));
+
+            if (!WiFi.config(ip, gw, subnet, dns_primary, dns_secondary)) {
+                Serial.println("Falha ao configurar IP estático");
+            }
+        } else {
+            Serial.println("Usando DHCP para obter IP automaticamente");
+        }
+        
+
+
+        
+
+        WiFi.begin(ssid.c_str(), password.c_str());
+        
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(1000);
+            Serial.print(".");
+            attempts++;
+        }
+
+
+
+
+
+
+
+
+
+
+
+        
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("\nFalha ao conectar ao WiFi");
+            softAPEnabled = true; // Marca como AP ativo para evitar reinicialização do WiFi
+            // >>> Ativa o modo AP temporário sem salvar no JSON <<<
+            String fallbackSSID     = jsonNetwork["softAP"]["ssid"].as<String>();
+            String fallbackPassword = jsonNetwork["softAP"]["password"].as<String>();
+
+            
+            Serial.println("Ativando modo AP temporário...");
+            WiFi.mode(WIFI_AP);
+            WiFi.softAP(fallbackSSID.c_str(), fallbackPassword.c_str());
+            Serial.print("SSID: ");
+            Serial.println(fallbackSSID);
+            Serial.print("IP do AP: ");
+            Serial.println(WiFi.softAPIP());
+            wifiConnected = true; // Considera conectado para seguir o fluxo
+        } else {
+            Serial.println("\nWiFi conectado!");
+            Serial.print("IP obtido: ");
+            Serial.println(WiFi.localIP());
+            wifiConnected = true;
+        }
+    }
+    
+    if (wifiConnected) {
+        Serial.println("✅ WiFi configurado com sucesso!");
+
+        if(WiFi.getMode() & WIFI_AP) {  // Verifica se o modo AP está ativo
+            Serial.printf("Modo: SoftAP - IP: %s\n", WiFi.softAPIP().toString().c_str());
+        } else {
+            Serial.printf("Modo: Station - IP: %s\n", WiFi.localIP().toString().c_str());
+        }
+
+        // --- Configuração do mDNS | mDNS Configuration ---
+        String hostName = jsonNetwork["hostName"].as<String>();
+
+        if (!hostName.isEmpty()) {
+            if (MDNS.begin(hostName.c_str())) {
+                Serial.println("✅ mDNS iniciado!");
+                Serial.printf("🌐 Acesse por: http://%s/\n", hostName.c_str());
+            } else {
+                Serial.println("❌ Falha ao iniciar mDNS");
+            }
+        }
+
+    }
+    
+    Serial.println("==========================================");
+    return wifiConnected;
+
+}
+
+
+void ES_WiFi::disconnect() {
+    WiFi.disconnect();
+}
+
+bool ES_WiFi::isConnected() {
+    return WiFi.status() == WL_CONNECTED;
+}

@@ -1,0 +1,23 @@
+{
+  "name": "TFT_eSPI_ES32Lab",
+  "version": "2.5.43",
+  "keywords": "Arduino, TFT, display, ES32Lab, ESP32, ILI9341, ST7735, ST7789, ST7796, GC9A01",
+  "description": "Customized version of Bodmer's TFT_eSPI v2.5.43 for ES32Lab. Pre-configured GPIOs for full compatibility with ES32Lab development board.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ESDeveloperBR/TFT_eSPI_ES32Lab"
+  },
+  "authors": [
+    {
+      "name": "Bodmer",
+      "email": "bodmer@anola.net"
+    },
+    {
+      "name": "ESDeveloperBR",
+      "maintainer": true
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": "TFT_eSPI.h"
+}
