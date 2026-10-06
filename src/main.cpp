@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -17,7 +18,7 @@
 // ============================================================
 // ES32Lab - VISUALIZADOR DE RESULTADOS ELEITORAIS TSE
 // ============================================================
-// Versao 2.3.2
+// Versao 2.4.1
 //
 // 1.0.0 - Resultados TSE 2026
 // 1.1.0 - Correcao ArduinoJson/NestingLimit
@@ -43,18 +44,33 @@
 // 2.3.2 - Ajusta geometria dos campos TURNO/UF, centraliza o botao
 //         SALVAR E INICIAR e corrige alinhamento dos indicadores
 //         na margem direita das listas de Wi-Fi.
+// 2.4.0 - Atualizacao OTA pelo GitHub com controle de versao via
+//         manifest.json e correcao definitiva do editor de senha:
+//         posicao vazia apos inserir e caractere pendente incluido ao salvar.
+// 2.4.1 - Confirma conexao Wi-Fi antes de voltar ao menu, substitui
+//         simbolos ^v/<> por setas graficas reais nos rodapes e verifica
+//         automaticamente novas versoes durante a tela de abertura.
 //
 // ============================================================
 
 constexpr char APP_NAME[] = "ES32Lab Eleicoes";
-constexpr char APP_VERSION[] = "2.3.2";
-constexpr char APP_BUILD_DATE[] = "2026-10-05";
-constexpr uint32_t APP_BUILD_YYYYMMDD = 20261005UL;
+constexpr char APP_VERSION[] = "2.4.1";
+constexpr char APP_BUILD_DATE[] = "2026-10-06";
+constexpr uint32_t APP_BUILD_YYYYMMDD = 20261006UL;
 
 // Nao ha credenciais privadas compiladas no firmware publico.
 // Redes sao cadastradas pela interface e persistidas em NVS.
 constexpr char DEFAULT_WIFI_SSID[] = "";
 constexpr char DEFAULT_WIFI_PASSWORD[] = "";
+
+// Distribuicao oficial / atualizacao OTA.
+constexpr char OTA_MANIFEST_URL[] =
+  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
+  "releases/latest/download/manifest.json";
+
+constexpr char OTA_FIRMWARE_FALLBACK_URL[] =
+  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
+  "releases/latest/download/ES32Lab-Eleicoes.bin";
 
 // ============================================================
 // CONFIGURACAO ELEITORAL - ALTERAR AQUI NA PROXIMA ELEICAO GERAL
@@ -125,6 +141,7 @@ ES_TimeInterval passwordRepeatTimer;
 ES_TimeInterval passwordCursorTimer;
 ES_TimeInterval photoPreloadTimer;
 ES_TimeInterval splashTimer;
+ES_TimeInterval wifiSuccessTimer;
 ES_File files;
 ES_WiFi esWifi;
 Preferences prefs;
@@ -272,6 +289,7 @@ enum View {
   VIEW_WIFI_DELETE,
   VIEW_PASSWORD,
   VIEW_UPDATE_INTERVAL,
+  VIEW_SYSTEM_UPDATE,
   VIEW_CACHE_CONFIRM,
   VIEW_ABOUT
 };
@@ -343,6 +361,13 @@ bool splashMinimumElapsed = false;
 bool startupWifiCycleFinished = false;
 bool startupWifiProvisioning = false;
 bool startupAppEntered = false;
+bool startupUpdateChecked = false;
+
+// Confirmacao visual de conexao Wi-Fi manual
+bool wifiSuccessPending = false;
+bool wifiSuccessActive = false;
+String wifiSuccessSsid;
+String wifiSuccessIp;
 
 // Editor de eleicao
 uint8_t editRound = 1;
@@ -358,6 +383,27 @@ bool passwordSecure = true;
 uint16_t passwordRepeatCount = 0;
 bool passwordRepeatActive = false;
 bool passwordCursorVisible = true;
+bool passwordHasPendingChar = false;
+
+// Atualizacao OTA
+enum OtaUiState {
+  OTA_UI_IDLE,
+  OTA_UI_CHECKING,
+  OTA_UI_CURRENT,
+  OTA_UI_AVAILABLE,
+  OTA_UI_ERROR,
+  OTA_UI_INSTALLING
+};
+
+volatile bool otaModeActive = false;
+OtaUiState otaUiState = OTA_UI_IDLE;
+String otaAvailableVersion;
+String otaFirmwareUrl = OTA_FIRMWARE_FALLBACK_URL;
+String otaExpectedSha256;
+uint32_t otaRemoteSize = 0;
+String otaMessage;
+int otaLastProgress = -5;
+bool otaEnteredFromStartup = false;
 
 // Confirmacao exclusao Wi-Fi
 uint8_t wifiDeleteIndex = 0;
@@ -858,6 +904,16 @@ void serviceWifiConnection() {
     return;
 
   if (connected) {
+    // A confirmacao manual nao depende apenas da transicao de status.
+    // Isso cobre inclusive reconexao rapida a uma rede ja conhecida.
+    if (wifiManualConnect &&
+        WiFi.SSID() == manualSsid) {
+      wifiManualConnect = false;
+      wifiSuccessSsid = WiFi.SSID();
+      wifiSuccessIp = WiFi.localIP().toString();
+      wifiSuccessPending = true;
+    }
+
     if (!wasConnected) {
       wasConnected = true;
       wifiConnecting = false;
@@ -871,8 +927,14 @@ void serviceWifiConnection() {
       if (idx > 0) promoteWifi(idx);
 
       configureClockForUf(activeUf);
-      catalogRequested = true;
-      refreshRequested = true;
+
+      // Durante a abertura, preserva a rede livre para a verificacao
+      // silenciosa de firmware. Os dados do TSE sao solicitados assim
+      // que a aplicacao efetivamente entra.
+      if (startupAppEntered) {
+        catalogRequested = true;
+        refreshRequested = true;
+      }
     }
     return;
   }
@@ -2016,6 +2078,14 @@ void networkTask(void* parameter) {
   RuntimeSelection refreshSelection;
 
   for (;;) {
+    // Durante verificacao/instalacao OTA, o worker de rede fica em repouso
+    // para nao disputar HTTPS, RAM ou banda com o atualizador.
+    if (otaModeActive) {
+      networkWorkerState = NET_IDLE;
+      vTaskDelay(pdMS_TO_TICKS(30));
+      continue;
+    }
+
     // Scan Wi-Fi e uma acao solicitada explicitamente pelo usuario.
     if (scanRequested) {
       scanRequested = false;
@@ -2187,11 +2257,129 @@ void drawHeader(const String& title) {
   drawClockOnly();
 }
 
+void drawFooterArrow(int x, int centerY, char direction, uint16_t color) {
+  switch (direction) {
+    case '^':
+      display.fillTriangle(
+        x + 3, centerY - 3,
+        x,     centerY + 1,
+        x + 6, centerY + 1,
+        color
+      );
+      break;
+
+    case 'v':
+      display.fillTriangle(
+        x,     centerY - 1,
+        x + 6, centerY - 1,
+        x + 3, centerY + 3,
+        color
+      );
+      break;
+
+    case '<':
+      display.fillTriangle(
+        x,     centerY,
+        x + 4, centerY - 4,
+        x + 4, centerY + 4,
+        color
+      );
+      break;
+
+    case '>':
+      display.fillTriangle(
+        x + 5, centerY,
+        x + 1, centerY - 4,
+        x + 1, centerY + 4,
+        color
+      );
+      break;
+  }
+}
+
+int footerVisualWidth(const String& text) {
+  int width = 0;
+
+  for (size_t i = 0; i < text.length(); i++) {
+    char c = text[i];
+
+    // Pares usados historicamente na interface:
+    // ^v = cima/baixo e <> = esquerda/direita.
+    if (i + 1 < text.length()) {
+      char n = text[i + 1];
+
+      if (c == '^' && n == 'v') {
+        width += 14;
+        i++;
+        continue;
+      }
+
+      if (c == '<' && n == '>') {
+        width += 14;
+        i++;
+        continue;
+      }
+    }
+
+    if (c == '^' || c == 'v' || c == '<' || c == '>') {
+      width += 7;
+    } else {
+      width += display.textWidth(String(c), 1);
+    }
+  }
+
+  return width;
+}
+
 void drawFooter(const String& text) {
   display.fillRect(0, 115, 160, 13, C_PANEL);
   display.drawFastHLine(0, 114, 160, TFT_CYAN);
+
+  // Preserva o 'v' minusculo do marcador ^v. Assim a letra V real
+  // de palavras como VOLTA/VAZIO nunca e confundida com uma seta.
+  String shown = asciiText(text);
+  if (shown.length() > 26)
+    shown = shown.substring(0, 25) + ".";
+  int totalWidth = footerVisualWidth(shown);
+  int x = max(2, (160 - totalWidth) / 2);
+  const int textY = 118;
+  const int arrowY = 122;
+
   display.setTextColor(TFT_CYAN, C_PANEL);
-  display.drawString(fitText(text, 26), 2, 118, 1);
+
+  for (size_t i = 0; i < shown.length(); i++) {
+    char c = shown[i];
+
+    if (i + 1 < shown.length()) {
+      char n = shown[i + 1];
+
+      if (c == '^' && n == 'v') {
+        drawFooterArrow(x,     arrowY, '^', TFT_YELLOW);
+        drawFooterArrow(x + 7, arrowY, 'v', TFT_YELLOW);
+        x += 14;
+        i++;
+        continue;
+      }
+
+      if (c == '<' && n == '>') {
+        drawFooterArrow(x,     arrowY, '<', TFT_YELLOW);
+        drawFooterArrow(x + 7, arrowY, '>', TFT_YELLOW);
+        x += 14;
+        i++;
+        continue;
+      }
+    }
+
+    if (c == '^' || c == 'v' || c == '<' || c == '>') {
+      drawFooterArrow(x, arrowY, c, TFT_YELLOW);
+      x += 7;
+      continue;
+    }
+
+    String one(c);
+    display.drawString(one, x, textY, 1);
+    x += display.textWidth(one, 1);
+  }
 }
 
 void drawContentPanel(int x = 2, int y = 22, int w = 156, int h = 89) {
@@ -2382,21 +2570,41 @@ void renderElectionEditor() {
 // CONFIGURACOES
 // ============================================================
 
+void drawSettingsRow(
+  int y,
+  const String& label,
+  bool selected
+) {
+  const int x = 7;
+  const int w = 146;
+  const int h = 14;
+
+  uint16_t bg = selected ? C_SELECT : C_PANEL;
+  uint16_t fg = selected ? TFT_YELLOW : TFT_WHITE;
+  uint16_t border = selected ? TFT_CYAN : C_LINE;
+
+  display.fillRoundRect(x, y, w, h, 3, bg);
+  display.drawRoundRect(x, y, w, h, 3, border);
+  display.setTextColor(fg, bg);
+  display.drawCentreScreenString(fitText(label, 22), y + 3, 1);
+}
+
 void renderSettings() {
   drawUiBackground();
   drawHeader("CONFIGURACOES");
-  drawContentPanel(2, 21, 156, 91);
+  drawContentPanel(2, 20, 156, 94);
 
   const char* items[] = {
     "WI-FI",
-    "ATUALIZACAO",
+    "INTERVALO TSE",
+    "ATUALIZAR SISTEMA",
     "LIMPAR CACHE",
     "SOBRE",
     "VOLTAR"
   };
 
-  for (uint8_t i = 0; i < 5; i++)
-    drawRow(23 + i * 17, items[i], "", i == settingsIndex);
+  for (uint8_t i = 0; i < 6; i++)
+    drawSettingsRow(22 + i * 15, items[i], i == settingsIndex);
 
   drawFooter("^v SELECIONA  OK ENTRA");
 }
@@ -2404,6 +2612,35 @@ void renderSettings() {
 // ============================================================
 // MENU WIFI
 // ============================================================
+
+void renderWifiConnectionSuccess() {
+  drawUiBackground();
+  drawHeader("WI-FI");
+  drawContentPanel(5, 26, 150, 80);
+
+  display.setTextColor(TFT_GREEN, C_BG);
+  display.drawCentreScreenString("CONEXAO BEM-SUCEDIDA", 38, 1);
+
+  display.setTextColor(TFT_WHITE, C_BG);
+  display.drawCentreScreenString(
+    fitRawText(wifiSuccessSsid, 23),
+    58,
+    1
+  );
+
+  if (wifiSuccessIp.length()) {
+    display.setTextColor(TFT_LIGHTGREY, C_BG);
+    display.drawCentreScreenString(
+      "IP " + wifiSuccessIp,
+      74,
+      1
+    );
+  }
+
+  display.setTextColor(TFT_CYAN, C_BG);
+  display.drawCentreScreenString("RETORNANDO AO MENU...", 92, 1);
+  drawFooter("WI-FI CONECTADO");
+}
 
 uint8_t wifiMenuItemCount() {
   return wifiCount + 2; // buscar + voltar
@@ -2533,8 +2770,10 @@ String passwordGroupName() {
 }
 
 void drawPasswordEntryLine() {
-  // Senha confirmada + caractere atual ainda nao inserido.
-  // O sublinhado piscante marca exatamente o ponto de insercao.
+  // passwordValue contem somente caracteres ja confirmados.
+  // passwordHasPendingChar indica se existe um caractere em edicao.
+  // Quando nao existe caractere pendente, aparece apenas o cursor:
+  // a proxima posicao esta realmente vazia.
   constexpr int fieldX = 43;
   constexpr int fieldY = 39;
   constexpr int fieldW = 113;
@@ -2564,14 +2803,19 @@ void drawPasswordEntryLine() {
   if (cursorX > fieldX + fieldW - charWidth)
     cursorX = fieldX + fieldW - charWidth;
 
-  display.setTextColor(TFT_YELLOW, C_PANEL);
-  display.drawString(
-    String(selectedPasswordChar()),
-    cursorX,
-    42,
-    1
-  );
+  // O caractere so e desenhado quando o usuario realmente iniciou
+  // a selecao dessa nova posicao usando UP/DOWN.
+  if (passwordHasPendingChar) {
+    display.setTextColor(TFT_YELLOW, C_PANEL);
+    display.drawString(
+      String(selectedPasswordChar()),
+      cursorX,
+      42,
+      1
+    );
+  }
 
+  // O sublinhado pisca tanto com caractere pendente quanto na posicao vazia.
   if (passwordCursorVisible) {
     display.drawFastHLine(
       cursorX,
@@ -2602,23 +2846,40 @@ void renderPassword() {
   drawPasswordEntryLine();
 
   display.setTextColor(TFT_YELLOW, C_BG);
+
+  String pendingText = passwordHasPendingChar
+    ? String(selectedPasswordChar())
+    : " ";
+
   display.drawCentreScreenString(
     "GRUPO " + passwordGroupName() +
-    "  [" + String(selectedPasswordChar()) + "]",
+    "  [" + pendingText + "]",
     65,
     1
   );
 
   display.setTextColor(TFT_LIGHTGREY, C_BG);
-  display.drawCentreScreenString("^v MUDA  > INSERE  < APAGA", 83, 1);
-  display.drawCentreScreenString("OK GRUPO | SEG OK SALVA", 98, 1);
+  display.drawCentreScreenString("CIMA/BAIXO MUDA", 83, 1);
+  display.drawCentreScreenString("DIR CONFIRMA | ESQ APAGA", 98, 1);
 
-  drawFooter("CURSOR PISCA = PROXIMO");
+  drawFooter("OK GRUPO | SEG OK SALVA");
 }
 
 void changePasswordChar(int delta) {
   const char* group = PASSWORD_GROUPS[passwordGroup];
   int len = strlen(group);
+
+  if (len <= 0)
+    return;
+
+  // Primeira acao numa posicao vazia cria o caractere pendente.
+  // UP comeca pelo primeiro caractere; DOWN pelo ultimo.
+  if (!passwordHasPendingChar) {
+    passwordCharIndex = delta < 0 ? len - 1 : 0;
+    passwordHasPendingChar = true;
+    return;
+  }
+
   int pos = passwordCharIndex + delta;
 
   if (pos < 0) pos = len - 1;
@@ -2633,7 +2894,7 @@ void changePasswordChar(int delta) {
 
 void renderUpdateInterval() {
   drawUiBackground();
-  drawHeader("ATUALIZACAO");
+  drawHeader("INTERVALO TSE");
   drawContentPanel(2, 23, 156, 88);
 
   display.setTextColor(TFT_WHITE, C_BG);
@@ -2650,6 +2911,349 @@ void renderUpdateInterval() {
   display.drawCentreScreenString("30 / 60 / 90 / 120", 84, 1);
 
   drawFooter("<> ALTERA  OK SALVA");
+}
+
+
+// ============================================================
+// ATUALIZACAO DO SISTEMA / OTA
+// ============================================================
+
+int versionPart(const String& version, uint8_t part) {
+  int values[3] = {0, 0, 0};
+  uint8_t current = 0;
+  String number;
+
+  for (size_t i = 0; i <= version.length() && current < 3; i++) {
+    char c = i < version.length() ? version[i] : '.';
+
+    if (c >= '0' && c <= '9') {
+      number += c;
+    }
+    else if (c == '.' || i == version.length()) {
+      values[current] = number.length() ? number.toInt() : 0;
+      number = "";
+      current++;
+    }
+    else {
+      // Sufixos como -beta sao ignorados para a comparacao numerica.
+      if (number.length() && current < 3) {
+        values[current] = number.toInt();
+      }
+      break;
+    }
+  }
+
+  return part < 3 ? values[part] : 0;
+}
+
+int compareVersions(const String& a, const String& b) {
+  for (uint8_t i = 0; i < 3; i++) {
+    int av = versionPart(a, i);
+    int bv = versionPart(b, i);
+
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+  }
+
+  return 0;
+}
+
+bool waitNetworkWorkerForOta(uint32_t timeoutMs = 10000UL) {
+  otaModeActive = true;
+
+  // Da ao worker de rede tempo para observar o bloqueio antes de
+  // verificarmos NET_IDLE. Se ele ja estiver em uma requisicao,
+  // aguardamos sua conclusao abaixo.
+  delay(60);
+
+  ES_TimeInterval waitTimer;
+  waitTimer.resetMillis();
+
+  while (networkWorkerState != NET_IDLE) {
+    if (waitTimer.intervalMillis(timeoutMs)) {
+      otaModeActive = false;
+      return false;
+    }
+
+    delay(10);
+  }
+
+  return true;
+}
+
+void renderSystemUpdate() {
+  drawUiBackground();
+  drawHeader("ATUALIZACAO");
+  drawContentPanel(4, 23, 152, 88);
+
+  display.setTextColor(TFT_WHITE, C_BG);
+  display.drawString("INSTALADA:", 9, 31, 1);
+  display.drawString(String(APP_VERSION), 85, 31, 1);
+
+  display.drawString("DISPONIVEL:", 9, 47, 1);
+
+  String available = otaAvailableVersion.length()
+    ? otaAvailableVersion
+    : "--";
+
+  display.drawString(fitRawText(available, 11), 85, 47, 1);
+
+  if (otaUiState == OTA_UI_CHECKING) {
+    display.setTextColor(TFT_CYAN, C_BG);
+    display.drawCentreScreenString("CONSULTANDO GITHUB...", 68, 1);
+    drawFooter("AGUARDE");
+    return;
+  }
+
+  if (otaUiState == OTA_UI_AVAILABLE) {
+    display.setTextColor(TFT_YELLOW, C_BG);
+    display.drawCentreScreenString("ATUALIZACAO DISPONIVEL", 66, 1);
+
+    if (otaRemoteSize > 0) {
+      display.setTextColor(TFT_LIGHTGREY, C_BG);
+      display.drawCentreScreenString(
+        String(otaRemoteSize / 1024UL) + " KB",
+        82,
+        1
+      );
+    }
+
+    drawFooter("< VOLTA  OK ATUALIZA");
+    return;
+  }
+
+  if (otaUiState == OTA_UI_CURRENT) {
+    display.setTextColor(TFT_GREEN, C_BG);
+    display.drawCentreScreenString("SISTEMA ATUALIZADO", 70, 1);
+    drawFooter("< VOLTA  OK VERIFICA");
+    return;
+  }
+
+  if (otaUiState == OTA_UI_ERROR) {
+    display.setTextColor(TFT_RED, C_BG);
+    display.drawCentreScreenString(
+      fitText(otaMessage.length() ? otaMessage : "ERRO AO CONSULTAR", 24),
+      66,
+      1
+    );
+    drawFooter("< VOLTA  OK TENTA NOVO");
+    return;
+  }
+
+  display.setTextColor(TFT_CYAN, C_BG);
+  display.drawCentreScreenString("VERIFICAR NOVA VERSAO", 69, 1);
+  drawFooter("< VOLTA  OK VERIFICA");
+}
+
+void renderOtaProgress(int percent) {
+  percent = constrain(percent, 0, 100);
+
+  // Atualiza somente a regiao dinamica.
+  display.fillRect(8, 52, 144, 54, C_PANEL);
+
+  display.setTextColor(TFT_WHITE, C_PANEL);
+  display.drawCentreScreenString("INSTALANDO FIRMWARE", 57, 1);
+
+  display.drawRoundRect(13, 75, 134, 14, 2, TFT_CYAN);
+
+  int fill = ((134 - 4) * percent) / 100;
+
+  if (fill > 0)
+    display.fillRect(15, 77, fill, 10, TFT_GREEN);
+
+  display.setTextColor(TFT_YELLOW, C_PANEL);
+  display.drawCentreScreenString(String(percent) + "%", 94, 1);
+}
+
+void otaFirmwareProgress(int current, int total) {
+  if (total <= 0)
+    return;
+
+  int percent = (current * 100) / total;
+
+  if (percent != 100 && percent < otaLastProgress + 5)
+    return;
+
+  otaLastProgress = percent;
+  renderOtaProgress(percent);
+
+  Serial.printf("OTA: %d%%\n", percent);
+}
+
+void checkFirmwareUpdate(bool renderUi = true, uint32_t timeoutMs = 15000UL) {
+  otaUiState = OTA_UI_CHECKING;
+  otaAvailableVersion = "";
+  otaFirmwareUrl = OTA_FIRMWARE_FALLBACK_URL;
+  otaExpectedSha256 = "";
+  otaRemoteSize = 0;
+  otaMessage = "";
+  if (renderUi) renderSystemUpdate();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "SEM CONEXAO WI-FI";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  if (!waitNetworkWorkerForOta(timeoutMs)) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "REDE OCUPADA";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(timeoutMs);
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  bool begun = http.begin(client, OTA_MANIFEST_URL);
+
+  if (!begun) {
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "FALHA HTTPS";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  int httpCode = http.GET();
+
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    otaModeActive = false;
+
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "HTTP " + String(httpCode);
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "MANIFESTO INVALIDO";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  otaAvailableVersion = doc["version"] | "";
+
+  const char* remoteFirmwareUrl =
+    doc["firmware_url"] | OTA_FIRMWARE_FALLBACK_URL;
+
+  otaFirmwareUrl = remoteFirmwareUrl;
+  otaExpectedSha256 = doc["sha256"] | "";
+  otaRemoteSize = doc["size"] | 0UL;
+
+  otaModeActive = false;
+
+  if (otaAvailableVersion.length() == 0) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "VERSAO AUSENTE";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  otaUiState =
+    compareVersions(String(APP_VERSION), otaAvailableVersion) < 0
+      ? OTA_UI_AVAILABLE
+      : OTA_UI_CURRENT;
+
+  if (renderUi) renderSystemUpdate();
+}
+
+void installFirmwareUpdate() {
+  if (WiFi.status() != WL_CONNECTED) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "SEM CONEXAO WI-FI";
+    renderSystemUpdate();
+    return;
+  }
+
+  if (!waitNetworkWorkerForOta()) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "REDE OCUPADA";
+    renderSystemUpdate();
+    return;
+  }
+
+  otaUiState = OTA_UI_INSTALLING;
+
+  drawUiBackground();
+  drawHeader("ATUALIZACAO");
+  drawContentPanel(4, 23, 152, 88);
+
+  display.setTextColor(TFT_CYAN, C_BG);
+  display.drawCentreScreenString("PREPARANDO...", 37, 1);
+  renderOtaProgress(0);
+  drawFooter("NAO DESLIGUE A PLACA");
+
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("ATUALIZACAO OTA");
+  Serial.print("Instalada: ");
+  Serial.println(APP_VERSION);
+  Serial.print("Disponivel: ");
+  Serial.println(otaAvailableVersion);
+  Serial.print("URL: ");
+  Serial.println(otaFirmwareUrl);
+  Serial.println("========================================");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15000);
+
+  otaLastProgress = -5;
+
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  httpUpdate.rebootOnUpdate(false);
+  httpUpdate.onProgress(otaFirmwareProgress);
+
+  t_httpUpdate_return result =
+    httpUpdate.update(client, otaFirmwareUrl);
+
+  if (result == HTTP_UPDATE_OK) {
+    renderOtaProgress(100);
+
+    display.fillRect(8, 31, 144, 75, C_PANEL);
+    display.setTextColor(TFT_GREEN, C_PANEL);
+    display.drawCentreScreenString("ATUALIZACAO CONCLUIDA", 48, 1);
+    display.setTextColor(TFT_WHITE, C_PANEL);
+    display.drawCentreScreenString("REINICIANDO...", 69, 1);
+    drawFooter("ES32Lab ELEICOES");
+
+    Serial.println("OTA concluida. Reiniciando...");
+
+    delay(2500);
+    ESP.restart();
+    return;
+  }
+
+  otaModeActive = false;
+  otaUiState = OTA_UI_ERROR;
+
+  if (result == HTTP_UPDATE_NO_UPDATES) {
+    otaMessage = "SEM ALTERACOES";
+  } else {
+    otaMessage =
+      "OTA " +
+      String(httpUpdate.getLastError());
+  }
+
+  Serial.print("Falha OTA: ");
+  Serial.println(httpUpdate.getLastErrorString());
+
+  renderSystemUpdate();
 }
 
 // ============================================================
@@ -3023,6 +3627,7 @@ void renderCurrentView() {
     case VIEW_WIFI_DELETE: renderWifiDelete(); break;
     case VIEW_PASSWORD: renderPassword(); break;
     case VIEW_UPDATE_INTERVAL: renderUpdateInterval(); break;
+    case VIEW_SYSTEM_UPDATE: renderSystemUpdate(); break;
     case VIEW_CACHE_CONFIRM: renderCacheConfirm(); break;
     case VIEW_ABOUT: renderAbout(); break;
   }
@@ -3228,33 +3833,64 @@ void handleElectionInput(CenterEvent center) {
 }
 
 void handleSettingsInput(CenterEvent center) {
+  constexpr uint8_t SETTINGS_COUNT = 6;
+
   if (keyboard.press(KEY_UP)) {
-    settingsIndex = settingsIndex == 0 ? 4 : settingsIndex - 1;
+    settingsIndex =
+      settingsIndex == 0
+      ? SETTINGS_COUNT - 1
+      : settingsIndex - 1;
     renderSettings();
   }
+
   if (keyboard.press(KEY_DOWN)) {
-    settingsIndex = (settingsIndex + 1) % 5;
+    settingsIndex = (settingsIndex + 1) % SETTINGS_COUNT;
     renderSettings();
   }
+
   if (keyboard.press(KEY_LEFT)) {
     view = VIEW_MAIN;
     renderMain();
+    return;
   }
 
   if (center == CENTER_SHORT) {
     if (settingsIndex == 0) {
       wifiMenuIndex = 0;
       view = VIEW_WIFI;
-    } else if (settingsIndex == 1) {
-      view = VIEW_UPDATE_INTERVAL;
-    } else if (settingsIndex == 2) {
-      view = VIEW_CACHE_CONFIRM;
-    } else if (settingsIndex == 3) {
-      view = VIEW_ABOUT;
-    } else {
-      view = VIEW_MAIN;
+      renderWifiMenu();
+      return;
     }
-    renderCurrentView();
+
+    if (settingsIndex == 1) {
+      view = VIEW_UPDATE_INTERVAL;
+      renderUpdateInterval();
+      return;
+    }
+
+    if (settingsIndex == 2) {
+      otaEnteredFromStartup = false;
+      view = VIEW_SYSTEM_UPDATE;
+      otaUiState = OTA_UI_IDLE;
+      renderSystemUpdate();
+      checkFirmwareUpdate();
+      return;
+    }
+
+    if (settingsIndex == 3) {
+      view = VIEW_CACHE_CONFIRM;
+      renderCacheConfirm();
+      return;
+    }
+
+    if (settingsIndex == 4) {
+      view = VIEW_ABOUT;
+      renderAbout();
+      return;
+    }
+
+    view = VIEW_MAIN;
+    renderMain();
   }
 }
 
@@ -3340,6 +3976,7 @@ void handleWifiScanInput(CenterEvent center) {
     passwordValue = "";
     passwordGroup = 0;
     passwordCharIndex = 0;
+    passwordHasPendingChar = false;
 
     if (!passwordSecure) {
       addOrUpdateWifi(passwordSsid, "");
@@ -3358,32 +3995,65 @@ void handlePasswordInput(CenterEvent center) {
   servicePasswordCharacterInput();
 
   if (keyboard.press(KEY_RIGHT)) {
-    if (passwordValue.length() < 63)
+    // RIGHT confirma somente se existe caractere pendente.
+    // A proxima posicao volta a ficar realmente vazia.
+    if (passwordHasPendingChar && passwordValue.length() < 63) {
       passwordValue += selectedPasswordChar();
-    renderPassword();
+      passwordHasPendingChar = false;
+      passwordCharIndex = 0;
+      resetPasswordCursor();
+      renderPassword();
+    }
   }
 
   if (keyboard.press(KEY_LEFT)) {
-    if (passwordValue.length() > 0)
+    // Se existe um caractere ainda nao confirmado, LEFT apenas cancela
+    // essa selecao. Caso contrario apaga o ultimo caractere confirmado.
+    if (passwordHasPendingChar) {
+      passwordHasPendingChar = false;
+      passwordCharIndex = 0;
+      resetPasswordCursor();
+      renderPassword();
+      return;
+    }
+
+    if (passwordValue.length() > 0) {
       passwordValue.remove(passwordValue.length() - 1);
+      renderPassword();
+    }
     else {
       view = VIEW_WIFI_SCAN;
       renderWifiScan();
       return;
     }
-    renderPassword();
   }
 
   if (center == CENTER_SHORT) {
     passwordGroup = (passwordGroup + 1) % PASSWORD_GROUP_COUNT;
     passwordCharIndex = 0;
+
+    // Se ja havia caractere em edicao, ele passa a representar o
+    // primeiro caractere do novo grupo. Se a posicao estava vazia,
+    // continua vazia.
     resetPasswordCursor();
     renderPassword();
   }
 
   if (center == CENTER_LONG) {
-    addOrUpdateWifi(passwordSsid, passwordValue);
-    requestManualWifi(passwordSsid, passwordValue);
+    String finalPassword = passwordValue;
+
+    // O caractere que o usuario esta vendo e automaticamente valido
+    // ao salvar. Nao e mais necessario pressionar RIGHT antes.
+    if (passwordHasPendingChar && finalPassword.length() < 63) {
+      finalPassword += selectedPasswordChar();
+    }
+
+    passwordValue = finalPassword;
+    passwordHasPendingChar = false;
+
+    addOrUpdateWifi(passwordSsid, finalPassword);
+    requestManualWifi(passwordSsid, finalPassword);
+
     wifiMenuIndex = 0;
     view = VIEW_WIFI;
     renderWifiMenu();
@@ -3423,6 +4093,50 @@ void handleUpdateInput(CenterEvent center) {
     pollTimer.resetMillis();
     view = VIEW_SETTINGS;
     renderSettings();
+  }
+}
+
+void handleSystemUpdateInput(CenterEvent center) {
+  if (keyboard.press(KEY_LEFT)) {
+    otaModeActive = false;
+
+    // Quando a atualizacao foi oferecida automaticamente na abertura,
+    // VOLTAR significa continuar para a aplicacao, e nao cair no meio
+    // do submenu de configuracoes.
+    if (otaEnteredFromStartup) {
+      otaEnteredFromStartup = false;
+
+      if (profileWasSaved) {
+        view = VIEW_MAIN;
+        menuIndex = 0;
+      } else {
+        beginElectionEditor();
+        view = VIEW_ELECTION;
+      }
+
+      renderCurrentView();
+
+      if (WiFi.status() == WL_CONNECTED) {
+        catalogRequested = true;
+        refreshRequested = true;
+      }
+
+      pollTimer.resetMillis();
+      return;
+    }
+
+    view = VIEW_SETTINGS;
+    renderSettings();
+    return;
+  }
+
+  if (center == CENTER_SHORT) {
+    if (otaUiState == OTA_UI_AVAILABLE) {
+      installFirmwareUpdate();
+    }
+    else if (otaUiState != OTA_UI_INSTALLING) {
+      checkFirmwareUpdate();
+    }
   }
 }
 
@@ -3526,6 +4240,7 @@ void handleInput() {
     case VIEW_WIFI_DELETE: handleWifiDeleteInput(center); break;
     case VIEW_PASSWORD: handlePasswordInput(center); break;
     case VIEW_UPDATE_INTERVAL: handleUpdateInput(center); break;
+    case VIEW_SYSTEM_UPDATE: handleSystemUpdateInput(center); break;
     case VIEW_CACHE_CONFIRM: handleCacheInput(center); break;
     case VIEW_ABOUT: handleAboutInput(center); break;
   }
@@ -3536,6 +4251,9 @@ void handleInput() {
 // ============================================================
 
 void serviceIdlePhotoPreload() {
+  if (otaModeActive)
+    return;
+
   if (!startupAppEntered || view != VIEW_RESULTS)
     return;
 
@@ -3597,7 +4315,46 @@ void enterApplicationAfterStartup() {
   }
 
   renderCurrentView();
+
+  // Agora que a tela principal entrou, libera as consultas eleitorais.
+  if (WiFi.status() == WL_CONNECTED) {
+    catalogRequested = true;
+    refreshRequested = true;
+  }
+
   pollTimer.resetMillis();
+}
+
+void serviceWifiSuccessFlow() {
+  if (wifiSuccessPending && !wifiSuccessActive) {
+    wifiSuccessPending = false;
+    wifiSuccessActive = true;
+
+    // A confirmacao de Wi-Fi assume temporariamente a tela inteira.
+    startupSplashActive = false;
+    startupPresentationActive = false;
+
+    renderWifiConnectionSuccess();
+    wifiSuccessTimer.resetMillis();
+  }
+
+  if (!wifiSuccessActive)
+    return;
+
+  if (!wifiSuccessTimer.intervalMillis(1800UL))
+    return;
+
+  wifiSuccessActive = false;
+
+  // No primeiro provisionamento, continua exatamente para o ponto
+  // normal de entrada da aplicacao. Nas demais conexoes, volta ao menu.
+  if (!startupAppEntered) {
+    enterApplicationAfterStartup();
+  } else {
+    view = VIEW_MAIN;
+    menuIndex = 0;
+    renderMain();
+  }
 }
 
 void enterStartupWifiScan() {
@@ -3617,6 +4374,11 @@ void serviceStartupFlow() {
   // Depois de entrar no aplicativo, este servico nao interfere mais
   // na navegacao normal.
   if (startupAppEntered)
+    return;
+
+  // Durante a confirmacao visual de uma nova rede, o fluxo inicial
+  // aguarda a mensagem terminar antes de trocar de tela.
+  if (wifiSuccessPending || wifiSuccessActive)
     return;
 
   // Etapa 1: QR Code ES Developer.
@@ -3640,6 +4402,14 @@ void serviceStartupFlow() {
 
   // Etapa 2: apresentacao Eleicoes 2026.
   if (startupPresentationActive) {
+    // Assim que houver internet, aproveita a propria tela de abertura para
+    // consultar silenciosamente a Release mais recente. A consulta tem
+    // timeout reduzido para nunca prender a inicializacao por muito tempo.
+    if (WiFi.status() == WL_CONNECTED && !startupUpdateChecked) {
+      startupUpdateChecked = true;
+      checkFirmwareUpdate(false, 5000UL);
+    }
+
     if (!splashMinimumElapsed &&
         splashTimer.intervalMillis(PRESENTATION_MIN_MS)) {
       splashMinimumElapsed = true;
@@ -3648,8 +4418,21 @@ void serviceStartupFlow() {
     if (!splashMinimumElapsed)
       return;
 
-    // Apos o tempo minimo, segue assim que houver conexao.
+    // Se a consulta silenciosa encontrou versao nova, a primeira tela
+    // interativa do aplicativo ja sera a tela de atualizacao.
     if (WiFi.status() == WL_CONNECTED) {
+      if (otaUiState == OTA_UI_AVAILABLE) {
+        startupSplashActive = false;
+        startupPresentationActive = false;
+        startupWifiProvisioning = false;
+        startupAppEntered = true;
+        otaEnteredFromStartup = true;
+
+        view = VIEW_SYSTEM_UPDATE;
+        renderSystemUpdate();
+        return;
+      }
+
       enterApplicationAfterStartup();
       return;
     }
@@ -3755,11 +4538,14 @@ void setup() {
 
 void loop() {
   serviceWifiConnection();
+  serviceWifiSuccessFlow();
   serviceStartupFlow();
 
-  // Durante QR Code e tela de apresentacao nao ha navegacao.
+  // Durante QR Code, apresentacao e confirmacao de Wi-Fi nao ha navegacao.
   // O teclado volta a atuar ao entrar no scanner ou no aplicativo.
-  if (!startupSplashActive && !startupPresentationActive) {
+  if (!startupSplashActive &&
+      !startupPresentationActive &&
+      !wifiSuccessActive) {
     handleInput();
   }
 
@@ -3774,6 +4560,7 @@ void loop() {
   // Nao desenha o relogio sobre QR Code ou splash de apresentacao.
   if (!startupSplashActive &&
       !startupPresentationActive &&
+      !wifiSuccessActive &&
       clockUiTimer.intervalMillis(5000UL)) {
     drawClockOnly();
   }
