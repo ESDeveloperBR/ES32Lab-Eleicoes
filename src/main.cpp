@@ -18,7 +18,7 @@
 // ============================================================
 // ES32Lab - VISUALIZADOR DE RESULTADOS ELEITORAIS TSE
 // ============================================================
-// Versao 2.4.1
+// Versao 2.4.2
 //
 // 1.0.0 - Resultados TSE 2026
 // 1.1.0 - Correcao ArduinoJson/NestingLimit
@@ -50,11 +50,14 @@
 // 2.4.1 - Confirma conexao Wi-Fi antes de voltar ao menu, substitui
 //         simbolos ^v/<> por setas graficas reais nos rodapes e verifica
 //         automaticamente novas versoes durante a tela de abertura.
+// 2.4.2 - Reduz redesenhos desnecessarios na tela de resultados:
+//         cada cargo atualiza somente a pagina correspondente, fotos
+//         pre-carregadas nao forcam refresh e dados identicos nao redesenham.
 //
 // ============================================================
 
 constexpr char APP_NAME[] = "ES32Lab Eleicoes";
-constexpr char APP_VERSION[] = "2.4.1";
+constexpr char APP_VERSION[] = "2.4.2";
 constexpr char APP_BUILD_DATE[] = "2026-10-06";
 constexpr uint32_t APP_BUILD_YYYYMMDD = 20261006UL;
 
@@ -273,6 +276,8 @@ struct RuntimeSelection {
 
 struct PhotoRequest {
   bool pending = false;
+  bool notifyUi = false;
+  uint8_t slot = 255;
   String url;
   String path;
   String key;
@@ -325,7 +330,12 @@ volatile bool catalogRequested = false;
 volatile bool refreshRequested = false;
 volatile bool refreshRunning = false;
 volatile NetworkWorkerState networkWorkerState = NET_IDLE;
-volatile bool uiDataDirty = false;
+
+// Atualizacoes da UI de resultados sao rastreadas por cargo.
+// Isso evita redesenhar a tela inteira quando um cargo que nao esta
+// visivel termina de atualizar no worker de rede.
+volatile uint8_t uiRaceDirtyMask = 0;
+volatile bool uiStatusDirty = false;
 volatile bool catalogUiDirty = false;
 
 SemaphoreHandle_t raceMutex = nullptr;
@@ -1050,9 +1060,17 @@ RuntimeSelection getRuntimeSelection() {
   return s;
 }
 
-void clearRaceData() {
+void clearRaceData(bool notifyUi = false) {
   xSemaphoreTake(raceMutex, portMAX_DELAY);
-  for (uint8_t i = 0; i < RACE_SLOTS; i++) races[i] = RaceData();
+
+  for (uint8_t i = 0; i < RACE_SLOTS; i++)
+    races[i] = RaceData();
+
+  if (notifyUi) {
+    uiRaceDirtyMask = (1U << RACE_SLOTS) - 1U;
+    uiStatusDirty = true;
+  }
+
   xSemaphoreGive(raceMutex);
   resultPage = 0;
 }
@@ -1535,11 +1553,98 @@ RaceData raceCopy(uint8_t slot) {
   return out;
 }
 
+bool candidateUiEquals(
+  const Candidate& a,
+  const Candidate& b
+) {
+  return
+    a.number == b.number &&
+    a.name == b.name &&
+    a.party == b.party &&
+    a.percentage == b.percentage &&
+    a.sqcand == b.sqcand &&
+    a.votes == b.votes &&
+    a.sourceOrder == b.sourceOrder;
+}
+
+bool raceUiEquals(
+  const RaceData& a,
+  const RaceData& b
+) {
+  if (
+    a.title != b.title ||
+    a.shortTitle != b.shortTitle ||
+    a.office != b.office ||
+    a.usePhotos != b.usePhotos ||
+    a.candidateCount != b.candidateCount ||
+    a.selected != b.selected ||
+    a.scroll != b.scroll ||
+    a.hasData != b.hasData ||
+    a.stale != b.stale ||
+    a.countStarted != b.countStarted ||
+    a.httpCode != b.httpCode ||
+    a.sectionPercent != b.sectionPercent ||
+    a.andamento != b.andamento ||
+    a.divulgacao != b.divulgacao ||
+    a.date != b.date ||
+    a.time != b.time ||
+    a.error != b.error ||
+    a.totalCandidateVotes != b.totalCandidateVotes
+  ) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < a.candidateCount; i++) {
+    if (!candidateUiEquals(a.candidates[i], b.candidates[i]))
+      return false;
+  }
+
+  return true;
+}
+
+void markRaceUiDirty(uint8_t slot) {
+  if (slot >= RACE_SLOTS)
+    return;
+
+  xSemaphoreTake(raceMutex, portMAX_DELAY);
+  uiRaceDirtyMask |= (1U << slot);
+  xSemaphoreGive(raceMutex);
+}
+
+void markStatusUiDirty() {
+  xSemaphoreTake(raceMutex, portMAX_DELAY);
+  uiStatusDirty = true;
+  xSemaphoreGive(raceMutex);
+}
+
+uint8_t takeRaceUiDirtyMask() {
+  xSemaphoreTake(raceMutex, portMAX_DELAY);
+  uint8_t mask = uiRaceDirtyMask;
+  uiRaceDirtyMask = 0;
+  xSemaphoreGive(raceMutex);
+  return mask;
+}
+
+bool takeStatusUiDirty() {
+  xSemaphoreTake(raceMutex, portMAX_DELAY);
+  bool dirty = uiStatusDirty;
+  uiStatusDirty = false;
+  xSemaphoreGive(raceMutex);
+  return dirty;
+}
+
 void setRace(uint8_t slot, const RaceData& value) {
   xSemaphoreTake(raceMutex, portMAX_DELAY);
-  if (slot < RACE_SLOTS) races[slot] = value;
+
+  if (slot < RACE_SLOTS) {
+    bool changed = !raceUiEquals(races[slot], value);
+    races[slot] = value;
+
+    if (changed)
+      uiRaceDirtyMask |= (1U << slot);
+  }
+
   xSemaphoreGive(raceMutex);
-  uiDataDirty = true;
 }
 
 bool fetchRace(
@@ -1913,9 +2018,8 @@ void refreshElectionCatalogOnline() {
 
     if (mustFallback) {
       prefs.putUChar("round", 1);
-      clearRaceData();
+      clearRaceData(true);
       refreshRequested = true;
-      uiDataDirty = true;
 
       Serial.println("Turno 2 ainda nao publicado para este perfil; usando turno 1.");
     }
@@ -1928,8 +2032,10 @@ void refreshElectionCatalogOnline() {
 
 void requestPhotoFor(
   const RuntimeSelection& s,
+  uint8_t slot,
   uint8_t office,
-  const Candidate& c
+  const Candidate& c,
+  bool notifyUi
 ) {
   if (!littleFsReady || c.sqcand.length() == 0) return;
 
@@ -1941,6 +2047,8 @@ void requestPhotoFor(
 
   xSemaphoreTake(photoMutex, portMAX_DELAY);
   if (!photoRequest.pending) {
+    photoRequest.notifyUi = notifyUi;
+    photoRequest.slot = slot;
     photoRequest.url = photoUrl(s, office, c);
     photoRequest.path = path;
     photoRequest.key = key;
@@ -2022,8 +2130,10 @@ void processPhotoRequest() {
   files.remove(LittleFS, req.path);
   if (!files.move(LittleFS, tmp, req.path)) {
     files.remove(LittleFS, tmp);
-  } else {
-    uiDataDirty = true;
+  } else if (req.notifyUi) {
+    // Somente a foto solicitada pela pagina visivel pede redesenho.
+    // O pre-cache da proxima foto permanece totalmente silencioso.
+    markRaceUiDirty(req.slot);
   }
 }
 
@@ -2130,14 +2240,11 @@ void networkTask(void* parameter) {
           refreshSelection = getRuntimeSelection();
           refreshSlot = 0;
           refreshCycleActive = true;
-          uiDataDirty = true;
 
-          if (refreshSelection.round == 2) {
-            setRace(0, RaceData());
-            setRace(1, RaceData());
-            setRace(2, RaceData());
-            setRace(3, RaceData());
-          }
+          // A pagina STATUS pode refletir que o ciclo iniciou.
+          // As paginas de cargos permanecem com os ultimos dados validos
+          // ate que o respectivo cargo receba uma resposta nova.
+          markStatusUiDirty();
         }
 
         if (refreshCycleActive) {
@@ -2147,7 +2254,7 @@ void networkTask(void* parameter) {
             refreshCycleActive = false;
             refreshRunning = false;
             networkWorkerState = NET_IDLE;
-            uiDataDirty = true;
+            markStatusUiDirty();
           }
           else {
             uint8_t raceCount =
@@ -2178,7 +2285,7 @@ void networkTask(void* parameter) {
               refreshCycleActive = false;
               refreshRunning = false;
               networkWorkerState = NET_IDLE;
-              uiDataDirty = true;
+              markStatusUiDirty();
             }
           }
         }
@@ -3347,14 +3454,22 @@ void drawPreCountNotice() {
 }
 
 void schedulePhotoIfNeeded(
+  uint8_t slot,
   const RaceData& race,
-  uint8_t candidateIndex
+  uint8_t candidateIndex,
+  bool notifyUi = true
 ) {
   if (!race.usePhotos || candidateIndex >= race.candidateCount) return;
 
   RuntimeSelection s = getRuntimeSelection();
   const Candidate& c = race.candidates[candidateIndex];
-  requestPhotoFor(s, race.office, c);
+  requestPhotoFor(
+    s,
+    slot,
+    race.office,
+    c,
+    notifyUi
+  );
 }
 
 void drawCandidatePhoto(
@@ -3464,7 +3579,7 @@ void renderPhotoRace(uint8_t slot) {
     race.countStarted ? color : TFT_DARKGREY
   );
 
-  schedulePhotoIfNeeded(race, index);
+  schedulePhotoIfNeeded(slot, race, index, true);
   drawFooter("<> TELAS ^v CAND SEG OK");
 }
 
@@ -4291,8 +4406,10 @@ void serviceIdlePhotoPreload() {
   // Somente chega aqui quando toda atividade mais importante terminou.
   // requestPhotoFor() nao duplica arquivos que ja estejam no cache.
   schedulePhotoIfNeeded(
+    slot,
     race,
-    nextIndex
+    nextIndex,
+    false
   );
 }
 
@@ -4572,12 +4689,27 @@ void loop() {
     drawPasswordEntryLine();
   }
 
-  // Resultado/foto terminou no worker.
-  if (uiDataDirty) {
-    uiDataDirty = false;
+  // Atualiza somente a pagina de resultado que realmente mudou.
+  // Atualizacoes de outros cargos sao consumidas silenciosamente; ao
+  // navegar para eles, renderResults() ja usara os dados mais recentes.
+  uint8_t dirtyRaceMask = takeRaceUiDirtyMask();
+  bool statusDirty = takeStatusUiDirty();
 
-    if (view == VIEW_RESULTS)
-      renderResults();
+  if (view == VIEW_RESULTS) {
+    if (resultPageIsStatus(resultPage)) {
+      if (statusDirty)
+        renderResultStatus();
+    }
+    else {
+      uint8_t visibleSlot = raceSlotForPage(resultPage);
+
+      if (
+        visibleSlot < RACE_SLOTS &&
+        (dirtyRaceMask & (1U << visibleSlot))
+      ) {
+        renderResults();
+      }
+    }
   }
 
   // O ele-c.json serve apenas para atualizar a disponibilidade
