@@ -2,7 +2,7 @@
   =====================================================================
   ES32Lab Eleicoes - Instalador OTA
   =====================================================================
-  Versao do instalador: 0.3.0
+  Versao do instalador: 0.3.1
 
   Repositorio oficial:
   https://github.com/ESDeveloperBR/ES32Lab-Eleicoes
@@ -49,7 +49,7 @@
   4. Depois da gravacao, acompanhe todo o processo pelo display.
   5. O instalador:
        - conecta ao Wi-Fi;
-       - salva a rede para o firmware final;
+       - salva a rede no padrao NVS ES_Wifi para o firmware final;
        - baixa o firmware mais recente do GitHub;
        - instala o firmware;
        - reinicia automaticamente.
@@ -100,6 +100,14 @@ ES_TimeInterval wifiAnimation;
 // =====================================================================
 
 Preferences preferences;
+
+// Padrao compartilhado de credenciais Wi-Fi.
+// Esse namespace podera ser utilizado por outros firmwares ES32Lab
+// que adotarem a mesma estrutura.
+constexpr char WIFI_PREFS_NAMESPACE[] = "ES_Wifi";
+constexpr char LEGACY_WIFI_PREFS_NAMESPACE[] = "es32-eleicao";
+constexpr uint8_t WIFI_STORAGE_VERSION = 1;
+constexpr uint8_t MAX_WIFI_NETWORKS = 6;
 
 // =====================================================================
 // CORES RGB565
@@ -317,11 +325,194 @@ void drawProgressBar(
 // =====================================================================
 // SALVA WI-FI PARA O FIRMWARE FINAL
 // =====================================================================
-
+//
+// Padrao NVS compartilhado:
+//
+//   namespace: ES_Wifi
+//   version = 1
+//   wcount  = quantidade de redes
+//   ws0/wp0 = SSID/senha da rede 0
+//   ws1/wp1 = SSID/senha da rede 1
+//   ...
+//
+// O Wi-Fi informado no instalador passa a ocupar a primeira posicao.
+// Se ja existirem outras redes no padrao ES_Wifi, elas sao preservadas
+// ate o limite de MAX_WIFI_NETWORKS.
+//
+// Se ainda nao existir o novo namespace, o instalador tenta importar
+// as redes do formato legado "es32-eleicao" antes de salvar.
+//
 bool saveWifiCredentials() {
+  String savedSsid[MAX_WIFI_NETWORKS];
+  String savedPassword[MAX_WIFI_NETWORKS];
+  uint8_t savedCount = 0;
+
+  // ---------------------------------------------------------------
+  // 1. TENTA LER O NOVO PADRAO ES_Wifi
+  // ---------------------------------------------------------------
+
+  bool hasNewStorage = false;
+
+  if (
+    preferences.begin(
+      WIFI_PREFS_NAMESPACE,
+      true
+    )
+  ) {
+    uint8_t storageVersion =
+      preferences.getUChar(
+        "version",
+        0
+      );
+
+    if (
+      storageVersion ==
+      WIFI_STORAGE_VERSION
+    ) {
+      hasNewStorage = true;
+
+      savedCount =
+        preferences.getUChar(
+          "wcount",
+          0
+        );
+
+      if (
+        savedCount >
+        MAX_WIFI_NETWORKS
+      ) {
+        savedCount =
+          MAX_WIFI_NETWORKS;
+      }
+
+      for (
+        uint8_t i = 0;
+        i < savedCount;
+        i++
+      ) {
+        savedSsid[i] =
+          preferences.getString(
+            ("ws" + String(i)).c_str(),
+            ""
+          );
+
+        savedPassword[i] =
+          preferences.getString(
+            ("wp" + String(i)).c_str(),
+            ""
+          );
+      }
+    }
+
+    preferences.end();
+  }
+
+  // ---------------------------------------------------------------
+  // 2. MIGRA O FORMATO ANTIGO, SE NECESSARIO
+  // ---------------------------------------------------------------
+
+  if (
+    !hasNewStorage
+  ) {
+    if (
+      preferences.begin(
+        LEGACY_WIFI_PREFS_NAMESPACE,
+        true
+      )
+    ) {
+      savedCount =
+        preferences.getUChar(
+          "wcount",
+          0
+        );
+
+      if (
+        savedCount >
+        MAX_WIFI_NETWORKS
+      ) {
+        savedCount =
+          MAX_WIFI_NETWORKS;
+      }
+
+      for (
+        uint8_t i = 0;
+        i < savedCount;
+        i++
+      ) {
+        savedSsid[i] =
+          preferences.getString(
+            ("ws" + String(i)).c_str(),
+            ""
+          );
+
+        savedPassword[i] =
+          preferences.getString(
+            ("wp" + String(i)).c_str(),
+            ""
+          );
+      }
+
+      preferences.end();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // 3. MONTA A NOVA LISTA
+  // ---------------------------------------------------------------
+  //
+  // A rede fornecida ao instalador fica na posicao 0.
+  // Redes ja existentes sao mantidas nas posicoes seguintes,
+  // sem duplicar o mesmo SSID.
+  // ---------------------------------------------------------------
+
+  String finalSsid[MAX_WIFI_NETWORKS];
+  String finalPassword[MAX_WIFI_NETWORKS];
+
+  uint8_t finalCount = 0;
+
+  finalSsid[finalCount] =
+    WIFI_SSID;
+
+  finalPassword[finalCount] =
+    WIFI_PASSWORD;
+
+  finalCount++;
+
+  for (
+    uint8_t i = 0;
+    i < savedCount &&
+    finalCount < MAX_WIFI_NETWORKS;
+    i++
+  ) {
+    if (
+      savedSsid[i].length() == 0
+    ) {
+      continue;
+    }
+
+    if (
+      savedSsid[i] ==
+      WIFI_SSID
+    ) {
+      continue;
+    }
+
+    finalSsid[finalCount] =
+      savedSsid[i];
+
+    finalPassword[finalCount] =
+      savedPassword[i];
+
+    finalCount++;
+  }
+
+  // ---------------------------------------------------------------
+  // 4. GRAVA NO PADRAO ES_Wifi
+  // ---------------------------------------------------------------
+
   if (
     !preferences.begin(
-      "es32-eleicao",
+      WIFI_PREFS_NAMESPACE,
       false
     )
   ) {
@@ -329,21 +520,66 @@ bool saveWifiCredentials() {
   }
 
   preferences.putUChar(
+    "version",
+    WIFI_STORAGE_VERSION
+  );
+
+  preferences.putUChar(
     "wcount",
-    1
+    finalCount
   );
 
-  preferences.putString(
-    "ws0",
-    WIFI_SSID
-  );
+  for (
+    uint8_t i = 0;
+    i < MAX_WIFI_NETWORKS;
+    i++
+  ) {
+    String keySsid =
+      "ws" + String(i);
 
-  preferences.putString(
-    "wp0",
-    WIFI_PASSWORD
-  );
+    String keyPassword =
+      "wp" + String(i);
+
+    if (
+      i < finalCount
+    ) {
+      preferences.putString(
+        keySsid.c_str(),
+        finalSsid[i]
+      );
+
+      preferences.putString(
+        keyPassword.c_str(),
+        finalPassword[i]
+      );
+    } else {
+      preferences.remove(
+        keySsid.c_str()
+      );
+
+      preferences.remove(
+        keyPassword.c_str()
+      );
+    }
+  }
 
   preferences.end();
+
+  Serial.print(
+    "Wi-Fi salvo no namespace "
+  );
+
+  Serial.println(
+    WIFI_PREFS_NAMESPACE
+  );
+
+  Serial.print(
+    "Redes cadastradas: "
+  );
+
+  Serial.println(
+    finalCount
+  );
 
   return true;
 }
@@ -536,7 +772,7 @@ void setup() {
     " ES32Lab Eleicoes - Instalador OTA"
   );
   Serial.println(
-    " Versao: 0.3.0"
+    " Versao: 0.3.1"
   );
   Serial.println(
     "========================================"

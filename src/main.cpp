@@ -18,7 +18,7 @@
 // ============================================================
 // ES32Lab - VISUALIZADOR DE RESULTADOS ELEITORAIS TSE
 // ============================================================
-// Versao 2.4.2
+// Versao 2.4.3
 //
 // 1.0.0 - Resultados TSE 2026
 // 1.1.0 - Correcao ArduinoJson/NestingLimit
@@ -53,13 +53,16 @@
 // 2.4.2 - Reduz redesenhos desnecessarios na tela de resultados:
 //         cada cargo atualiza somente a pagina correspondente, fotos
 //         pre-carregadas nao forcam refresh e dados identicos nao redesenham.
+// 2.4.3 - Padroniza o armazenamento de credenciais Wi-Fi no namespace
+//         NVS "ES_Wifi" e migra automaticamente redes salvas pelo formato
+//         anterior "es32-eleicao", preservando compatibilidade.
 //
 // ============================================================
 
 constexpr char APP_NAME[] = "ES32Lab Eleicoes";
-constexpr char APP_VERSION[] = "2.4.2";
-constexpr char APP_BUILD_DATE[] = "2026-10-06";
-constexpr uint32_t APP_BUILD_YYYYMMDD = 20261006UL;
+constexpr char APP_VERSION[] = "2.4.3";
+constexpr char APP_BUILD_DATE[] = "2026-10-08";
+constexpr uint32_t APP_BUILD_YYYYMMDD = 20261008UL;
 
 // Nao ha credenciais privadas compiladas no firmware publico.
 // Redes sao cadastradas pela interface e persistidas em NVS.
@@ -107,6 +110,12 @@ constexpr uint8_t MAX_CANDIDATES = 20;
 constexpr uint8_t MAX_ELECTIONS = 1;
 constexpr uint8_t MAX_WIFI_NETWORKS = 6;
 constexpr uint8_t MAX_SCAN_NETWORKS = 12;
+
+// Padrao compartilhado de credenciais Wi-Fi da ES32Lab.
+// O namespace fica independente deste aplicativo para permitir que
+// futuros firmwares que adotem o mesmo formato reutilizem as redes.
+constexpr char WIFI_PREFS_NAMESPACE[] = "ES_Wifi";
+constexpr uint8_t WIFI_STORAGE_VERSION = 1;
 constexpr uint8_t RACE_SLOTS = 4;
 constexpr uint8_t MAX_MISSING_PHOTOS = 30;
 
@@ -147,7 +156,8 @@ ES_TimeInterval splashTimer;
 ES_TimeInterval wifiSuccessTimer;
 ES_File files;
 ES_WiFi esWifi;
-Preferences prefs;
+Preferences prefs;      // Preferencias especificas do aplicativo.
+Preferences wifiPrefs;  // Credenciais Wi-Fi no padrao compartilhado ES_Wifi.
 
 // ============================================================
 // UF / FUSO
@@ -790,31 +800,80 @@ void loadPollSetting() {
 }
 
 // ============================================================
-// MULTI-WIFI EM NVS
+// MULTI-WIFI EM NVS - PADRAO ES_Wifi
 // ============================================================
-
+//
+// Estrutura logica:
+//   namespace: ES_Wifi
+//   version = 1
+//   wcount  = quantidade de redes
+//   ws0/wp0 = SSID/senha da rede 0
+//   ws1/wp1 = SSID/senha da rede 1
+//   ...
+//
+// O namespace e o formato sao independentes do aplicativo Eleicoes,
+// permitindo que outros firmwares ES32Lab adotem o mesmo padrao.
+//
 void persistWifiList() {
-  prefs.putUChar("wcount", wifiCount);
+  wifiPrefs.putUChar("version", WIFI_STORAGE_VERSION);
+  wifiPrefs.putUChar("wcount", wifiCount);
+
   for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
     String ks = "ws" + String(i);
     String kp = "wp" + String(i);
+
     if (i < wifiCount) {
-      prefs.putString(ks.c_str(), wifiList[i].ssid);
-      prefs.putString(kp.c_str(), wifiList[i].password);
+      wifiPrefs.putString(ks.c_str(), wifiList[i].ssid);
+      wifiPrefs.putString(kp.c_str(), wifiList[i].password);
     } else {
-      prefs.remove(ks.c_str());
-      prefs.remove(kp.c_str());
+      wifiPrefs.remove(ks.c_str());
+      wifiPrefs.remove(kp.c_str());
     }
   }
 }
 
 void loadWifiList() {
-  wifiCount = prefs.getUChar("wcount", 0);
+  wifiCount = 0;
+
+  // Migracao unica do formato usado ate a v2.4.2.
+  // O namespace antigo e mantido intacto para permitir rollback.
+  uint8_t storageVersion = wifiPrefs.getUChar("version", 0);
+
+  if (storageVersion == 0) {
+    uint8_t legacyCount = prefs.getUChar("wcount", 0);
+    if (legacyCount > MAX_WIFI_NETWORKS) legacyCount = MAX_WIFI_NETWORKS;
+
+    for (uint8_t i = 0; i < legacyCount; i++) {
+      wifiList[i].ssid =
+        prefs.getString(("ws" + String(i)).c_str(), "");
+      wifiList[i].password =
+        prefs.getString(("wp" + String(i)).c_str(), "");
+    }
+
+    wifiCount = legacyCount;
+
+    // Marca o novo armazenamento como inicializado mesmo quando nao ha
+    // redes antigas. Isso impede que redes legadas apagadas/obsoletas
+    // sejam importadas novamente no futuro.
+    persistWifiList();
+
+    if (legacyCount > 0) {
+      Serial.print("Wi-Fi: migradas ");
+      Serial.print(legacyCount);
+      Serial.println(" rede(s) de es32-eleicao para ES_Wifi.");
+    } else {
+      Serial.println("Wi-Fi: armazenamento ES_Wifi inicializado.");
+    }
+  }
+
+  wifiCount = wifiPrefs.getUChar("wcount", 0);
   if (wifiCount > MAX_WIFI_NETWORKS) wifiCount = MAX_WIFI_NETWORKS;
 
   for (uint8_t i = 0; i < wifiCount; i++) {
-    wifiList[i].ssid = prefs.getString(("ws" + String(i)).c_str(), "");
-    wifiList[i].password = prefs.getString(("wp" + String(i)).c_str(), "");
+    wifiList[i].ssid =
+      wifiPrefs.getString(("ws" + String(i)).c_str(), "");
+    wifiList[i].password =
+      wifiPrefs.getString(("wp" + String(i)).c_str(), "");
   }
 
   // Primeira execucao: preserva o "melhor dos dois mundos".
@@ -4611,6 +4670,7 @@ void setup() {
   photoMutex = xSemaphoreCreateMutex();
 
   prefs.begin("es32-eleicao", false);
+  wifiPrefs.begin(WIFI_PREFS_NAMESPACE, false);
 
   seedElectionCatalog();
   loadPollSetting();
