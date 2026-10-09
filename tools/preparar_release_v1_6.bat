@@ -486,14 +486,14 @@ try{
     if($hasData){$assets+=$dataOut}
     if($hasFull){$assets+=$fullOut}
 
-    $args=@("release","create",$tag)+$assets+@(
+    $releaseArguments=@("release","create",$tag)+$assets+@(
       "--repo",$repo,
       "--title",$tag,
       "--generate-notes",
       "--latest",
       "--verify-tag"
     )
-    Run $gh $args "Criando GitHub Release $tag"
+    Run $gh $releaseArguments "Criando GitHub Release $tag"
 
     Write-Host ""
     Write-Host "Release publicada:"

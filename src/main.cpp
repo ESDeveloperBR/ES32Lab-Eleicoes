@@ -8,7 +8,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <HTTPUpdate.h>
+#include <Update.h>
+#include <mbedtls/sha256.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -97,6 +98,8 @@
 // 2.5.3 - Mantem apenas versao e data vindas do PlatformIO.
 //         O nome interno do firmware volta a ser constante local,
 //         evitando problemas com espacos/acentuacao em build_flags.
+// Atual - OTA adaptado ao manifesto atual: sem campo size e com
+//         firmware_sha256 opcional, validado antes de concluir a gravacao.
 //
 // ============================================================
 
@@ -116,10 +119,6 @@ constexpr char DEFAULT_WIFI_PASSWORD[] = "";
 constexpr char OTA_MANIFEST_URL[] =
   "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
   "releases/latest/download/manifest.json";
-
-constexpr char OTA_FIRMWARE_FALLBACK_URL[] =
-  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
-  "releases/latest/download/ES32Lab-Eleicoes.bin";
 
 // ============================================================
 // CONFIGURACAO ELEITORAL - ALTERAR AQUI NA PROXIMA ELEICAO GERAL
@@ -477,9 +476,8 @@ enum OtaUiState {
 volatile bool otaModeActive = false;
 OtaUiState otaUiState = OTA_UI_IDLE;
 String otaAvailableVersion;
-String otaFirmwareUrl = OTA_FIRMWARE_FALLBACK_URL;
+String otaFirmwareUrl;
 String otaExpectedSha256;
-uint32_t otaRemoteSize = 0;
 String otaMessage;
 int otaLastProgress = -5;
 bool otaEnteredFromStartup = false;
@@ -3279,14 +3277,17 @@ void renderSystemUpdate() {
     display.setTextColor(TFT_YELLOW, C_BG);
     display.drawCentreScreenString("ATUALIZACAO DISPONIVEL", 66, 1);
 
-    if (otaRemoteSize > 0) {
-      display.setTextColor(TFT_LIGHTGREY, C_BG);
-      display.drawCentreScreenString(
-        String(otaRemoteSize / 1024UL) + " KB",
-        82,
-        1
-      );
-    }
+    display.setTextColor(
+      otaExpectedSha256.length() == 64 ? TFT_GREEN : TFT_ORANGE,
+      C_BG
+    );
+    display.drawCentreScreenString(
+      otaExpectedSha256.length() == 64
+        ? "SHA-256 INFORMADO"
+        : "SEM SHA-256",
+      82,
+      1
+    );
 
     drawFooter("< VOLTA  OK ATUALIZA");
     return;
@@ -3319,8 +3320,8 @@ void renderOtaProgress(int percent) {
   serialUiDirty = true;
   percent = constrain(percent, 0, 100);
 
-  // HTTPUpdate e bloqueante durante a instalacao. Por isso o progresso
-  // precisa ser enviado diretamente ao terminal, sem esperar o loop().
+  // A instalacao OTA e executada de forma bloqueante nesta etapa.
+  // Por isso o progresso vai diretamente ao terminal, sem esperar o loop().
   Serial.print("[OTA] Instalando: ");
   Serial.print(percent);
   Serial.println("%");
@@ -3357,14 +3358,42 @@ void otaFirmwareProgress(int current, int total) {
   DBG_PRINTF("OTA: %d%%\n", percent);
 }
 
+bool isValidSha256(const String& value) {
+  if (value.length() != 64)
+    return false;
+
+  for (size_t i = 0; i < value.length(); i++) {
+    if (!isxdigit((unsigned char)value[i]))
+      return false;
+  }
+
+  return true;
+}
+
+String sha256ToHex(const uint8_t digest[32]) {
+  // HEX ja e uma macro do core Arduino (Print.h).
+  static const char HEX_CHARS[] = "0123456789abcdef";
+
+  String result;
+  result.reserve(64);
+
+  for (uint8_t i = 0; i < 32; i++) {
+    result += HEX_CHARS[(digest[i] >> 4) & 0x0F];
+    result += HEX_CHARS[digest[i] & 0x0F];
+  }
+
+  return result;
+}
+
 void checkFirmwareUpdate(bool renderUi = true, uint32_t timeoutMs = 15000UL) {
   otaUiState = OTA_UI_CHECKING;
   otaAvailableVersion = "";
-  otaFirmwareUrl = OTA_FIRMWARE_FALLBACK_URL;
+  otaFirmwareUrl = "";
   otaExpectedSha256 = "";
-  otaRemoteSize = 0;
   otaMessage = "";
-  if (renderUi) renderSystemUpdate();
+
+  if (renderUi)
+    renderSystemUpdate();
 
   if (WiFi.status() != WL_CONNECTED) {
     otaUiState = OTA_UI_ERROR;
@@ -3424,13 +3453,12 @@ void checkFirmwareUpdate(bool renderUi = true, uint32_t timeoutMs = 15000UL) {
   }
 
   otaAvailableVersion = doc["version"] | "";
+  otaFirmwareUrl = doc["firmware_url"] | "";
+  otaExpectedSha256 = doc["firmware_sha256"] | "";
 
-  const char* remoteFirmwareUrl =
-    doc["firmware_url"] | OTA_FIRMWARE_FALLBACK_URL;
-
-  otaFirmwareUrl = remoteFirmwareUrl;
-  otaExpectedSha256 = doc["sha256"] | "";
-  otaRemoteSize = doc["size"] | 0UL;
+  otaFirmwareUrl.trim();
+  otaExpectedSha256.trim();
+  otaExpectedSha256.toLowerCase();
 
   otaModeActive = false;
 
@@ -3441,18 +3469,48 @@ void checkFirmwareUpdate(bool renderUi = true, uint32_t timeoutMs = 15000UL) {
     return;
   }
 
+  // Uma imagem FULL nao pode ser usada como atualizacao OTA comum.
+  // O firmware precisa estar explicitamente publicado no manifesto.
+  if (otaFirmwareUrl.length() == 0) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "FIRMWARE AUSENTE";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
+  // SHA-256 e opcional no padrao do manifesto. Quando informado,
+  // precisa obrigatoriamente ser valido e sera conferido antes de
+  // finalizar a atualizacao OTA.
+  if (
+    otaExpectedSha256.length() > 0 &&
+    !isValidSha256(otaExpectedSha256)
+  ) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "SHA256 INVALIDO";
+    if (renderUi) renderSystemUpdate();
+    return;
+  }
+
   otaUiState =
     compareVersions(String(APP_VERSION), otaAvailableVersion) < 0
       ? OTA_UI_AVAILABLE
       : OTA_UI_CURRENT;
 
-  if (renderUi) renderSystemUpdate();
+  if (renderUi)
+    renderSystemUpdate();
 }
 
 void installFirmwareUpdate() {
   if (WiFi.status() != WL_CONNECTED) {
     otaUiState = OTA_UI_ERROR;
     otaMessage = "SEM CONEXAO WI-FI";
+    renderSystemUpdate();
+    return;
+  }
+
+  if (otaFirmwareUrl.length() == 0) {
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "FIRMWARE AUSENTE";
     renderSystemUpdate();
     return;
   }
@@ -3475,62 +3533,274 @@ void installFirmwareUpdate() {
   renderOtaProgress(0);
   drawFooter("NAO DESLIGUE A PLACA");
 
-  DBG_PRINTLN();
-  DBG_PRINTLN("========================================");
-  DBG_PRINTLN("ATUALIZACAO OTA");
-  DBG_PRINT("Instalada: ");
-  DBG_PRINTLN(APP_VERSION);
-  DBG_PRINT("Disponivel: ");
-  DBG_PRINTLN(otaAvailableVersion);
-  DBG_PRINT("URL: ");
-  DBG_PRINTLN(otaFirmwareUrl);
-  DBG_PRINTLN("========================================");
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("ATUALIZACAO OTA");
+  Serial.print("Instalada: ");
+  Serial.println(APP_VERSION);
+  Serial.print("Disponivel: ");
+  Serial.println(otaAvailableVersion);
+  Serial.print("URL: ");
+  Serial.println(otaFirmwareUrl);
+
+  const bool verifySha256 = otaExpectedSha256.length() == 64;
+
+  if (verifySha256) {
+    Serial.println("SHA-256: verificacao ativada");
+  } else {
+    Serial.println(
+      "AVISO: manifesto sem SHA-256; integridade nao sera confirmada por hash."
+    );
+  }
+
+  Serial.println("========================================");
 
   WiFiClientSecure client;
   client.setInsecure();
   client.setTimeout(15000);
 
-  otaLastProgress = -5;
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  httpUpdate.rebootOnUpdate(false);
-  httpUpdate.onProgress(otaFirmwareProgress);
-
-  t_httpUpdate_return result =
-    httpUpdate.update(client, otaFirmwareUrl);
-
-  if (result == HTTP_UPDATE_OK) {
-    renderOtaProgress(100);
-
-    display.fillRect(8, 31, 144, 75, C_PANEL);
-    display.setTextColor(TFT_GREEN, C_PANEL);
-    display.drawCentreScreenString("ATUALIZACAO CONCLUIDA", 48, 1);
-    display.setTextColor(TFT_WHITE, C_PANEL);
-    display.drawCentreScreenString("REINICIANDO...", 69, 1);
-    drawFooter("ES32Lab ELEICOES");
-
-    DBG_PRINTLN("OTA concluida. Reiniciando...");
-
-    delay(2500);
-    ESP.restart();
+  if (!http.begin(client, otaFirmwareUrl)) {
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "FALHA HTTPS";
+    renderSystemUpdate();
     return;
   }
 
-  otaModeActive = false;
-  otaUiState = OTA_UI_ERROR;
+  int httpCode = http.GET();
 
-  if (result == HTTP_UPDATE_NO_UPDATES) {
-    otaMessage = "SEM ALTERACOES";
-  } else {
-    otaMessage =
-      "OTA " +
-      String(httpUpdate.getLastError());
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "HTTP " + String(httpCode);
+    renderSystemUpdate();
+    return;
   }
 
-  DBG_PRINT("Falha OTA: ");
-  DBG_PRINTLN(httpUpdate.getLastErrorString());
+  // O tamanho nao vem mais do manifesto. Quando o servidor HTTP
+  // informa Content-Length, ele e usado apenas para progresso e
+  // para inicializar a particao OTA. Caso contrario, a atualizacao
+  // funciona em modo de tamanho desconhecido.
+  int remoteLength = http.getSize();
+  size_t updateSize =
+    remoteLength > 0
+      ? (size_t)remoteLength
+      : UPDATE_SIZE_UNKNOWN;
 
-  renderSystemUpdate();
+  if (!Update.begin(updateSize)) {
+    http.end();
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "SEM ESPACO OTA";
+
+    Serial.print("[OTA] Update.begin falhou: ");
+    Serial.println(Update.getError());
+
+    renderSystemUpdate();
+    return;
+  }
+
+  mbedtls_sha256_context shaContext;
+  bool shaContextActive = false;
+
+  if (verifySha256) {
+    mbedtls_sha256_init(&shaContext);
+
+    if (mbedtls_sha256_starts_ret(&shaContext, 0) != 0) {
+      mbedtls_sha256_free(&shaContext);
+      Update.abort();
+      http.end();
+
+      otaModeActive = false;
+      otaUiState = OTA_UI_ERROR;
+      otaMessage = "ERRO SHA256";
+      renderSystemUpdate();
+      return;
+    }
+
+    shaContextActive = true;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buffer[1024];
+  size_t totalReceived = 0;
+  bool downloadOk = true;
+  String downloadError;
+
+  ES_TimeInterval receiveTimer;
+  receiveTimer.resetMillis();
+
+  otaLastProgress = -5;
+
+  while (
+    (
+      remoteLength <= 0 ||
+      totalReceived < (size_t)remoteLength
+    ) &&
+    (
+      http.connected() ||
+      stream->available() > 0
+    )
+  ) {
+    size_t available = stream->available();
+
+    if (available == 0) {
+      if (receiveTimer.intervalMillis(15000UL)) {
+        downloadOk = false;
+        downloadError = "TIMEOUT DOWNLOAD";
+        break;
+      }
+
+      delay(1);
+      continue;
+    }
+
+    size_t toRead = available;
+    if (toRead > sizeof(buffer))
+      toRead = sizeof(buffer);
+
+    int readCount = stream->readBytes(buffer, toRead);
+
+    if (readCount <= 0) {
+      downloadOk = false;
+      downloadError = "FALHA DOWNLOAD";
+      break;
+    }
+
+    receiveTimer.resetMillis();
+
+    if (shaContextActive) {
+      if (
+        mbedtls_sha256_update_ret(
+          &shaContext,
+          buffer,
+          (size_t)readCount
+        ) != 0
+      ) {
+        downloadOk = false;
+        downloadError = "ERRO SHA256";
+        break;
+      }
+    }
+
+    size_t written = Update.write(buffer, (size_t)readCount);
+
+    if (written != (size_t)readCount) {
+      downloadOk = false;
+      downloadError = "ERRO GRAVACAO";
+      break;
+    }
+
+    totalReceived += (size_t)readCount;
+
+    if (remoteLength > 0) {
+      otaFirmwareProgress(
+        (int)totalReceived,
+        remoteLength
+      );
+    }
+  }
+
+  // Se havia Content-Length, qualquer diferenca indica download
+  // incompleto, mesmo que a conexao tenha sido encerrada.
+  if (
+    downloadOk &&
+    remoteLength > 0 &&
+    totalReceived != (size_t)remoteLength
+  ) {
+    downloadOk = false;
+    downloadError = "DOWNLOAD INCOMPLETO";
+  }
+
+  String calculatedSha256;
+
+  if (downloadOk && shaContextActive) {
+    uint8_t digest[32];
+
+    if (
+      mbedtls_sha256_finish_ret(
+        &shaContext,
+        digest
+      ) != 0
+    ) {
+      downloadOk = false;
+      downloadError = "ERRO SHA256";
+    } else {
+      calculatedSha256 = sha256ToHex(digest);
+
+      if (!calculatedSha256.equalsIgnoreCase(otaExpectedSha256)) {
+        downloadOk = false;
+        downloadError = "SHA256 DIVERGENTE";
+      }
+    }
+  }
+
+  if (shaContextActive)
+    mbedtls_sha256_free(&shaContext);
+
+  http.end();
+
+  if (!downloadOk) {
+    Update.abort();
+
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = downloadError.length()
+      ? downloadError
+      : "FALHA OTA";
+
+    if (verifySha256 && calculatedSha256.length()) {
+      Serial.print("[OTA] SHA esperado:  ");
+      Serial.println(otaExpectedSha256);
+      Serial.print("[OTA] SHA recebido: ");
+      Serial.println(calculatedSha256);
+    }
+
+    renderSystemUpdate();
+    return;
+  }
+
+  // Com Content-Length conhecido, exigimos o tamanho exato.
+  // Sem Content-Length, end(true) finaliza usando os bytes recebidos.
+  bool finalized =
+    remoteLength > 0
+      ? Update.end(false)
+      : Update.end(true);
+
+  if (!finalized || !Update.isFinished()) {
+    otaModeActive = false;
+    otaUiState = OTA_UI_ERROR;
+    otaMessage = "FALHA AO FINALIZAR";
+
+    Serial.print("[OTA] Update.end falhou: ");
+    Serial.println(Update.getError());
+
+    renderSystemUpdate();
+    return;
+  }
+
+  if (verifySha256) {
+    Serial.print("[OTA] SHA-256 confirmado: ");
+    Serial.println(calculatedSha256);
+  }
+
+  renderOtaProgress(100);
+
+  display.fillRect(8, 31, 144, 75, C_PANEL);
+  display.setTextColor(TFT_GREEN, C_PANEL);
+  display.drawCentreScreenString("ATUALIZACAO CONCLUIDA", 48, 1);
+  display.setTextColor(TFT_WHITE, C_PANEL);
+  display.drawCentreScreenString("REINICIANDO...", 69, 1);
+  drawFooter("ES32Lab ELEICOES");
+
+  Serial.println("[OTA] Atualizacao concluida. Reiniciando...");
+
+  delay(2500);
+  ESP.restart();
 }
 
 // ============================================================
@@ -5094,12 +5364,14 @@ void serialRenderCurrentView() {
           "Nova versao disponivel."
         );
 
-        if (otaRemoteSize > 0) {
-          Serial.print("Tamanho: ");
-          Serial.print(
-            otaRemoteSize / 1024UL
+        if (otaExpectedSha256.length() == 64) {
+          Serial.println(
+            "SHA-256 informado: sera verificado antes da instalacao."
           );
-          Serial.println(" KB");
+        } else {
+          Serial.println(
+            "AVISO: manifesto sem SHA-256; integridade nao sera confirmada por hash."
+          );
         }
 
         Serial.println("1 - Atualizar agora");
