@@ -476,10 +476,24 @@ try{
 
     Run $git @("push","origin","refs/tags/$tag") "Enviando tag $tag"
 
-    & $gh "release" "view" $tag "--repo" $repo *> $null
-    if($LASTEXITCODE-eq 0){
+    # "gh release view" retorna codigo diferente de zero quando a Release
+    # ainda nao existe. Isso e esperado e nao deve cair no catch global,
+    # mesmo com $ErrorActionPreference = "Stop".
+    $previousErrorActionPreference=$ErrorActionPreference
+    $ErrorActionPreference="Continue"
+    try{
+      & $gh "release" "view" $tag "--repo" $repo 1>$null 2>$null
+      $releaseViewExitCode=$LASTEXITCODE
+    }finally{
+      $ErrorActionPreference=$previousErrorActionPreference
+    }
+
+    if($releaseViewExitCode-eq 0){
       throw "GitHub Release $tag ja existe. Altere a versao."
     }
+
+    Write-Host ""
+    Write-Host "GitHub Release $tag ainda nao existe: continuando com a publicacao."
 
     $assets=@($manifest)
     if($hasFw){$assets+=$fwOut}
