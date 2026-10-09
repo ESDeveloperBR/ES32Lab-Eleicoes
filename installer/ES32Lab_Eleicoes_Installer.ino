@@ -2,7 +2,7 @@
   =====================================================================
   ES32Lab Eleicoes - Instalador OTA
   =====================================================================
-  Versao do instalador: 0.3.1
+  Versao do instalador: 0.4.1
 
   Repositorio oficial:
   https://github.com/ESDeveloperBR/ES32Lab-Eleicoes
@@ -54,9 +54,6 @@
        - instala o firmware;
        - reinicia automaticamente.
 
-  A Release mais recente precisa possuir um arquivo chamado exatamente:
-
-       ES32Lab-Eleicoes.bin
 
   =====================================================================
 */
@@ -79,12 +76,12 @@ const char* WIFI_SSID     = "NOME_DO_SEU_WIFI";
 const char* WIFI_PASSWORD = "SENHA_DO_SEU_WIFI";
 
 // =====================================================================
-// FIRMWARE OFICIAL
+// MANIFESTO OFICIAL
 // =====================================================================
 
-const char* FIRMWARE_URL =
+const char* MANIFEST_URL =
   "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
-  "releases/latest/download/ES32Lab-Eleicoes.bin";
+  "releases/latest/download/manifest.json";
 
 // =====================================================================
 // OBJETOS ES32Lab
@@ -626,6 +623,267 @@ void otaProgress(
   );
 }
 
+
+// =====================================================================
+// MANIFESTO
+// =====================================================================
+
+bool extractJsonString(
+  const String& json,
+  const char* key,
+  String& value
+) {
+  value = "";
+
+  String token =
+    "\"" +
+    String(key) +
+    "\"";
+
+  int keyPos =
+    json.indexOf(
+      token
+    );
+
+  if (
+    keyPos < 0
+  ) {
+    return false;
+  }
+
+  int colonPos =
+    json.indexOf(
+      ':',
+      keyPos +
+      token.length()
+    );
+
+  if (
+    colonPos < 0
+  ) {
+    return false;
+  }
+
+  int pos =
+    colonPos + 1;
+
+  while (
+    pos < (int)json.length() &&
+    isspace(
+      (unsigned char)json[pos]
+    )
+  ) {
+    pos++;
+  }
+
+  if (
+    pos >= (int)json.length() ||
+    json[pos] != '"'
+  ) {
+    return false;
+  }
+
+  pos++;
+
+  bool escaped = false;
+
+  while (
+    pos < (int)json.length()
+  ) {
+    char c =
+      json[pos++];
+
+    if (
+      escaped
+    ) {
+      switch (
+        c
+      ) {
+        case '"':
+        case '\\':
+        case '/':
+          value += c;
+          break;
+
+        case 'b':
+          value += '\b';
+          break;
+
+        case 'f':
+          value += '\f';
+          break;
+
+        case 'n':
+          value += '\n';
+          break;
+
+        case 'r':
+          value += '\r';
+          break;
+
+        case 't':
+          value += '\t';
+          break;
+
+        default:
+          value += c;
+          break;
+      }
+
+      escaped = false;
+      continue;
+    }
+
+    if (
+      c == '\\'
+    ) {
+      escaped = true;
+      continue;
+    }
+
+    if (
+      c == '"'
+    ) {
+      return true;
+    }
+
+    value += c;
+  }
+
+  return false;
+}
+
+bool loadManifest(
+  String& firmwareUrl,
+  String& firmwareVersion,
+  String& errorText
+) {
+  firmwareUrl = "";
+  firmwareVersion = "";
+  errorText = "";
+
+  showStatus(
+    "ATUALIZACAO",
+    "CONSULTANDO",
+    "MANIFESTO...",
+    C_CYAN
+  );
+
+  Serial.println();
+  Serial.println(
+    "Consultando manifesto:"
+  );
+
+  Serial.println(
+    MANIFEST_URL
+  );
+
+  WiFiClientSecure client;
+
+  client.setInsecure();
+
+  client.setTimeout(
+    15000
+  );
+
+  HTTPClient http;
+
+  http.setFollowRedirects(
+    HTTPC_FORCE_FOLLOW_REDIRECTS
+  );
+
+  if (
+    !http.begin(
+      client,
+      MANIFEST_URL
+    )
+  ) {
+    errorText =
+      "FALHA HTTPS";
+
+    return false;
+  }
+
+  int httpCode =
+    http.GET();
+
+  if (
+    httpCode !=
+    HTTP_CODE_OK
+  ) {
+    errorText =
+      "HTTP " +
+      String(httpCode);
+
+    http.end();
+
+    return false;
+  }
+
+  String payload =
+    http.getString();
+
+  http.end();
+
+  if (
+    !extractJsonString(
+      payload,
+      "firmware_url",
+      firmwareUrl
+    )
+  ) {
+    errorText =
+      "FIRMWARE AUSENTE";
+
+    return false;
+  }
+
+  // A versao e apenas informativa neste instalador.
+  extractJsonString(
+    payload,
+    "version",
+    firmwareVersion
+  );
+
+  firmwareUrl.trim();
+  firmwareVersion.trim();
+
+  if (
+    firmwareUrl.length() == 0
+  ) {
+    errorText =
+      "URL VAZIA";
+
+    return false;
+  }
+
+  Serial.print(
+    "Firmware: "
+  );
+
+  Serial.println(
+    firmwareUrl
+  );
+
+  if (
+    firmwareVersion.length() > 0
+  ) {
+    Serial.print(
+      "Versao publicada: "
+    );
+
+    Serial.println(
+      firmwareVersion
+    );
+  }
+
+  Serial.println(
+    "Instalador temporario: SHA-256 nao sera validado."
+  );
+
+  return true;
+}
+
 // =====================================================================
 // CONECTA AO WI-FI
 // =====================================================================
@@ -772,7 +1030,7 @@ void setup() {
     " ES32Lab Eleicoes - Instalador OTA"
   );
   Serial.println(
-    " Versao: 0.3.1"
+    " Versao: 0.4.1"
   );
   Serial.println(
     "========================================"
@@ -883,6 +1141,43 @@ void setup() {
   );
 
   // -------------------------------------------------------------------
+  // CONSULTA MANIFESTO
+  // -------------------------------------------------------------------
+
+  String firmwareUrl;
+  String firmwareVersion;
+  String manifestError;
+
+  if (
+    !loadManifest(
+      firmwareUrl,
+      firmwareVersion,
+      manifestError
+    )
+  ) {
+    showStatus(
+      "FALHA",
+      "ERRO NO MANIFESTO",
+      shortText(
+        manifestError,
+        22
+      ),
+      C_RED
+    );
+
+    Serial.println();
+    Serial.print(
+      "Erro no manifesto: "
+    );
+
+    Serial.println(
+      manifestError
+    );
+
+    return;
+  }
+
+  // -------------------------------------------------------------------
   // PREPARA DOWNLOAD
   // -------------------------------------------------------------------
 
@@ -903,7 +1198,7 @@ void setup() {
   );
 
   Serial.println(
-    FIRMWARE_URL
+    firmwareUrl
   );
 
   WiFiClientSecure client;
@@ -950,7 +1245,7 @@ void setup() {
   t_httpUpdate_return result =
     httpUpdate.update(
       client,
-      FIRMWARE_URL
+      firmwareUrl.c_str()
     );
 
   // -------------------------------------------------------------------
@@ -1020,6 +1315,18 @@ void setup() {
       Serial.println(
         "Firmware instalado com sucesso."
       );
+
+      if (
+        firmwareVersion.length() > 0
+      ) {
+        Serial.print(
+          "Versao instalada: "
+        );
+
+        Serial.println(
+          firmwareVersion
+        );
+      }
 
       Serial.println(
         "Reiniciando..."
