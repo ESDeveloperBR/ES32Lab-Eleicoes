@@ -16,9 +16,42 @@
 #include <ctype.h>
 
 // ============================================================
+// TERMINAL SERIAL / DEBUG
+// ============================================================
+//
+// A Serial principal passa a ser uma interface de usuario.
+// Logs tecnicos antigos ficam desabilitados por padrao para nao
+// se misturarem aos menus. Para diagnostico, altere para 1.
+//
+#ifndef SERIAL_DEBUG_ENABLED
+#define SERIAL_DEBUG_ENABLED 0
+#endif
+
+#if SERIAL_DEBUG_ENABLED
+  #define DBG_PRINT(...)   Serial.print(__VA_ARGS__)
+  #define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
+  #define DBG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+  #define DBG_PRINT(...)   do {} while (0)
+  #define DBG_PRINTLN(...) do {} while (0)
+  #define DBG_PRINTF(...)  do {} while (0)
+#endif
+
+// Versao e data sao fornecidas pelo platformio.ini.
+// Os fallbacks permitem compilar o fonte fora do PlatformIO,
+// mas releases oficiais nao devem usar os valores padrao.
+#ifndef APP_VERSION
+#define APP_VERSION "0.0.0"
+#endif
+
+#ifndef APP_VERSION_DATE
+#define APP_VERSION_DATE "0000-00-00"
+#endif
+
+// ============================================================
 // ES32Lab - VISUALIZADOR DE RESULTADOS ELEITORAIS TSE
 // ============================================================
-// Versao 2.4.3
+// Versao definida pelo platformio.ini
 //
 // 1.0.0 - Resultados TSE 2026
 // 1.1.0 - Correcao ArduinoJson/NestingLimit
@@ -56,13 +89,23 @@
 // 2.4.3 - Padroniza o armazenamento de credenciais Wi-Fi no namespace
 //         NVS "ES_Wifi" e migra automaticamente redes salvas pelo formato
 //         anterior "es32-eleicao", preservando compatibilidade.
+// 2.5.0 - Versao/data centralizadas no platformio.ini e nova interface
+//         completa de Terminal Serial, com navegacao numerica por menus.
+//
+// 2.5.2 - Padroniza nome, versao e data recebidos diretamente
+//         do bloco [release] do platformio.ini.
+// 2.5.3 - Mantem apenas versao e data vindas do PlatformIO.
+//         O nome interno do firmware volta a ser constante local,
+//         evitando problemas com espacos/acentuacao em build_flags.
 //
 // ============================================================
 
+// Nome interno usado pelo firmware, TFT e Terminal Serial.
+// O nome publico/accentuado permanece em [release].name para o manifesto.
 constexpr char APP_NAME[] = "ES32Lab Eleicoes";
-constexpr char APP_VERSION[] = "2.4.3";
-constexpr char APP_BUILD_DATE[] = "2026-10-08";
-constexpr uint32_t APP_BUILD_YYYYMMDD = 20261008UL;
+
+// APP_VERSION e APP_VERSION_DATE sao macros de build fornecidas
+// pelo PlatformIO por meio de [release].version e version_date.
 
 // Nao ha credenciais privadas compiladas no firmware publico.
 // Redes sao cadastradas pela interface e persistidas em NVS.
@@ -357,6 +400,22 @@ SemaphoreHandle_t photoMutex = nullptr;
 TaskHandle_t networkTaskHandle = nullptr;
 
 View view = VIEW_MAIN;
+
+// Terminal Serial: somente numeros sao usados para navegacao.
+// Texto livre e aceito apenas quando um campo realmente exige texto,
+// como a senha de uma rede Wi-Fi.
+enum SerialInputMode {
+  SERIAL_INPUT_NORMAL,
+  SERIAL_INPUT_UF_SELECT,
+  SERIAL_INPUT_WIFI_DELETE_SELECT,
+  SERIAL_INPUT_PASSWORD
+};
+
+SerialInputMode serialInputMode = SERIAL_INPUT_NORMAL;
+String serialInputBuffer;
+bool serialUiDirty = true;
+View serialLastView = VIEW_MAIN;
+
 uint8_t menuIndex = 0;
 uint8_t settingsIndex = 0;
 uint8_t wifiMenuIndex = 0;
@@ -561,8 +620,42 @@ String dateText() {
   return String(b);
 }
 
+uint32_t versionDateNumber() {
+  const char* d = APP_VERSION_DATE;
+
+  if (!d || strlen(d) < 10)
+    return 0;
+
+  if (
+    !isdigit(d[0]) || !isdigit(d[1]) ||
+    !isdigit(d[2]) || !isdigit(d[3]) ||
+    d[4] != '-' ||
+    !isdigit(d[5]) || !isdigit(d[6]) ||
+    d[7] != '-' ||
+    !isdigit(d[8]) || !isdigit(d[9])
+  ) {
+    return 0;
+  }
+
+  uint32_t year =
+    (uint32_t)(d[0] - '0') * 1000UL +
+    (uint32_t)(d[1] - '0') * 100UL +
+    (uint32_t)(d[2] - '0') * 10UL +
+    (uint32_t)(d[3] - '0');
+
+  uint32_t month =
+    (uint32_t)(d[5] - '0') * 10UL +
+    (uint32_t)(d[6] - '0');
+
+  uint32_t day =
+    (uint32_t)(d[8] - '0') * 10UL +
+    (uint32_t)(d[9] - '0');
+
+  return year * 10000UL + month * 100UL + day;
+}
+
 uint32_t currentDateNumber() {
-  if (!clockValid()) return APP_BUILD_YYYYMMDD;
+  if (!clockValid()) return versionDateNumber();
   time_t now = time(nullptr);
   struct tm t;
   localtime_r(&now, &t);
@@ -858,11 +951,11 @@ void loadWifiList() {
     persistWifiList();
 
     if (legacyCount > 0) {
-      Serial.print("Wi-Fi: migradas ");
-      Serial.print(legacyCount);
-      Serial.println(" rede(s) de es32-eleicao para ES_Wifi.");
+      DBG_PRINT("Wi-Fi: migradas ");
+      DBG_PRINT(legacyCount);
+      DBG_PRINTLN(" rede(s) de es32-eleicao para ES_Wifi.");
     } else {
-      Serial.println("Wi-Fi: armazenamento ES_Wifi inicializado.");
+      DBG_PRINTLN("Wi-Fi: armazenamento ES_Wifi inicializado.");
     }
   }
 
@@ -945,8 +1038,8 @@ void startWifiAttempt(const String& ssid, const String& password) {
   wifiConnecting = true;
   wifiAttemptTimer.resetMillis();
 
-  Serial.print("WiFi tentando: ");
-  Serial.println(ssid);
+  DBG_PRINT("WiFi tentando: ");
+  DBG_PRINTLN(ssid);
 }
 
 void startWifiAutoCycle() {
@@ -987,10 +1080,10 @@ void serviceWifiConnection() {
       wasConnected = true;
       wifiConnecting = false;
 
-      Serial.print("WiFi conectado: ");
-      Serial.println(WiFi.SSID());
-      Serial.print("IP: ");
-      Serial.println(WiFi.localIP());
+      DBG_PRINT("WiFi conectado: ");
+      DBG_PRINTLN(WiFi.SSID());
+      DBG_PRINT("IP: ");
+      DBG_PRINTLN(WiFi.localIP());
 
       int idx = findSavedWifi(WiFi.SSID());
       if (idx > 0) promoteWifi(idx);
@@ -1054,7 +1147,7 @@ void serviceWifiConnection() {
 void initLittleFs() {
   littleFsReady = LittleFS.begin(true);
   if (!littleFsReady) {
-    Serial.println("LittleFS: FALHA");
+    DBG_PRINTLN("LittleFS: FALHA");
     return;
   }
 
@@ -1063,8 +1156,8 @@ void initLittleFs() {
   if (!files.directoryExists(LittleFS, "/photos"))
     files.createDirectory(LittleFS, "/photos");
 
-  Serial.print("LittleFS total: ");
-  Serial.println(files.getTotalSpace(LittleFS));
+  DBG_PRINT("LittleFS total: ");
+  DBG_PRINTLN(files.getTotalSpace(LittleFS));
 }
 
 void clearPhotoCache() {
@@ -1740,9 +1833,9 @@ bool fetchRace(
     return false;
   }
 
-  Serial.println();
-  Serial.println(out.shortTitle);
-  Serial.println(url);
+  DBG_PRINTLN();
+  DBG_PRINTLN(out.shortTitle);
+  DBG_PRINTLN(url);
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -1771,8 +1864,8 @@ bool fetchRace(
   int code = http.GET();
   out.httpCode = code;
 
-  Serial.print("HTTP ");
-  Serial.println(code);
+  DBG_PRINT("HTTP ");
+  DBG_PRINTLN(code);
 
   if (code != HTTP_CODE_OK) {
     String errText = (s.round == 2 && code == HTTP_CODE_NOT_FOUND)
@@ -1824,8 +1917,8 @@ bool fetchRace(
     if (out.scroll > maxScroll) out.scroll = maxScroll;
   }
 
-  Serial.print("Top candidatos mantidos: ");
-  Serial.println(out.candidateCount);
+  DBG_PRINT("Top candidatos mantidos: ");
+  DBG_PRINTLN(out.candidateCount);
 
   publish(out);
   return true;
@@ -1928,8 +2021,8 @@ void refreshElectionCatalogOnline() {
   http.end();
 
   if (err) {
-    Serial.print("ele-c.json JSON: ");
-    Serial.println(err.c_str());
+    DBG_PRINT("ele-c.json JSON: ");
+    DBG_PRINTLN(err.c_str());
     return;
   }
 
@@ -2038,19 +2131,19 @@ void refreshElectionCatalogOnline() {
 
   catalogUiDirty = true;
 
-  Serial.println("Catalogo eleitoral TSE atualizado.");
+  DBG_PRINTLN("Catalogo eleitoral TSE atualizado.");
 
   ElectionProfile dbg;
 
   if (getElectionProfile(APP_ELECTION_YEAR, dbg)) {
-    Serial.print("Perfil ");
-    Serial.print(APP_ELECTION_YEAR);
-    Serial.print(" | T1 federal=");
-    Serial.print(dbg.federal1);
-    Serial.print(" estadual=");
-    Serial.print(dbg.state1);
-    Serial.print(" | T2 publicado=");
-    Serial.println(
+    DBG_PRINT("Perfil ");
+    DBG_PRINT(APP_ELECTION_YEAR);
+    DBG_PRINT(" | T1 federal=");
+    DBG_PRINT(dbg.federal1);
+    DBG_PRINT(" estadual=");
+    DBG_PRINT(dbg.state1);
+    DBG_PRINT(" | T2 publicado=");
+    DBG_PRINTLN(
       secondRoundAvailableForUf(dbg, activeUf)
       ? "SIM"
       : "NAO"
@@ -2080,7 +2173,7 @@ void refreshElectionCatalogOnline() {
       clearRaceData(true);
       refreshRequested = true;
 
-      Serial.println("Turno 2 ainda nao publicado para este perfil; usando turno 1.");
+      DBG_PRINTLN("Turno 2 ainda nao publicado para este perfil; usando turno 1.");
     }
   }
 }
@@ -2360,6 +2453,7 @@ void networkTask(void* parameter) {
 // ============================================================
 
 void renderStartupSplash() {
+  serialUiDirty = true;
   display.fillScreen(TFT_WHITE);
 
   const int16_t x = (160 - ESDEVELOPER_QR_WIDTH) / 2;
@@ -2379,6 +2473,7 @@ void renderStartupSplash() {
 }
 
 void renderPresentationSplash() {
+  serialUiDirty = true;
   display.setSwapBytes(true);
   display.pushImage(
     0,
@@ -2665,6 +2760,7 @@ void drawElectionAction(
 // ============================================================
 
 void renderMain() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("MENU PRINCIPAL");
 
@@ -2708,6 +2804,7 @@ void beginElectionEditor() {
 }
 
 void renderElectionEditor() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("ELEICAO " + String(APP_ELECTION_YEAR));
   drawContentPanel(5, 23, 150, 88);
@@ -2756,6 +2853,7 @@ void drawSettingsRow(
 }
 
 void renderSettings() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("CONFIGURACOES");
   drawContentPanel(2, 20, 156, 94);
@@ -2780,6 +2878,7 @@ void renderSettings() {
 // ============================================================
 
 void renderWifiConnectionSuccess() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("WI-FI");
   drawContentPanel(5, 26, 150, 80);
@@ -2813,6 +2912,7 @@ uint8_t wifiMenuItemCount() {
 }
 
 void renderWifiMenu() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("WI-FI");
   drawContentPanel(2, 21, 156, 91);
@@ -2860,6 +2960,7 @@ void renderWifiMenu() {
 // ============================================================
 
 void renderWifiScan() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("BUSCAR WI-FI");
   drawContentPanel(2, 22, 156, 89);
@@ -2998,6 +3099,7 @@ void resetPasswordCursor() {
 }
 
 void renderPassword() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("SENHA WI-FI");
   drawContentPanel(2, 21, 156, 91);
@@ -3059,6 +3161,7 @@ void changePasswordChar(int delta) {
 // ============================================================
 
 void renderUpdateInterval() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("INTERVALO TSE");
   drawContentPanel(2, 23, 156, 88);
@@ -3148,6 +3251,7 @@ bool waitNetworkWorkerForOta(uint32_t timeoutMs = 10000UL) {
 }
 
 void renderSystemUpdate() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("ATUALIZACAO");
   drawContentPanel(4, 23, 152, 88);
@@ -3212,7 +3316,14 @@ void renderSystemUpdate() {
 }
 
 void renderOtaProgress(int percent) {
+  serialUiDirty = true;
   percent = constrain(percent, 0, 100);
+
+  // HTTPUpdate e bloqueante durante a instalacao. Por isso o progresso
+  // precisa ser enviado diretamente ao terminal, sem esperar o loop().
+  Serial.print("[OTA] Instalando: ");
+  Serial.print(percent);
+  Serial.println("%");
 
   // Atualiza somente a regiao dinamica.
   display.fillRect(8, 52, 144, 54, C_PANEL);
@@ -3243,7 +3354,7 @@ void otaFirmwareProgress(int current, int total) {
   otaLastProgress = percent;
   renderOtaProgress(percent);
 
-  Serial.printf("OTA: %d%%\n", percent);
+  DBG_PRINTF("OTA: %d%%\n", percent);
 }
 
 void checkFirmwareUpdate(bool renderUi = true, uint32_t timeoutMs = 15000UL) {
@@ -3364,16 +3475,16 @@ void installFirmwareUpdate() {
   renderOtaProgress(0);
   drawFooter("NAO DESLIGUE A PLACA");
 
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("ATUALIZACAO OTA");
-  Serial.print("Instalada: ");
-  Serial.println(APP_VERSION);
-  Serial.print("Disponivel: ");
-  Serial.println(otaAvailableVersion);
-  Serial.print("URL: ");
-  Serial.println(otaFirmwareUrl);
-  Serial.println("========================================");
+  DBG_PRINTLN();
+  DBG_PRINTLN("========================================");
+  DBG_PRINTLN("ATUALIZACAO OTA");
+  DBG_PRINT("Instalada: ");
+  DBG_PRINTLN(APP_VERSION);
+  DBG_PRINT("Disponivel: ");
+  DBG_PRINTLN(otaAvailableVersion);
+  DBG_PRINT("URL: ");
+  DBG_PRINTLN(otaFirmwareUrl);
+  DBG_PRINTLN("========================================");
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -3398,7 +3509,7 @@ void installFirmwareUpdate() {
     display.drawCentreScreenString("REINICIANDO...", 69, 1);
     drawFooter("ES32Lab ELEICOES");
 
-    Serial.println("OTA concluida. Reiniciando...");
+    DBG_PRINTLN("OTA concluida. Reiniciando...");
 
     delay(2500);
     ESP.restart();
@@ -3416,8 +3527,8 @@ void installFirmwareUpdate() {
       String(httpUpdate.getLastError());
   }
 
-  Serial.print("Falha OTA: ");
-  Serial.println(httpUpdate.getLastErrorString());
+  DBG_PRINT("Falha OTA: ");
+  DBG_PRINTLN(httpUpdate.getLastErrorString());
 
   renderSystemUpdate();
 }
@@ -3427,6 +3538,7 @@ void installFirmwareUpdate() {
 // ============================================================
 
 void renderCacheConfirm() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("LIMPAR CACHE");
   drawContentPanel(2, 23, 156, 88);
@@ -3442,6 +3554,7 @@ void renderCacheConfirm() {
 }
 
 void renderWifiDelete() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("EXCLUIR WI-FI");
   drawContentPanel(2, 23, 156, 88);
@@ -3459,14 +3572,15 @@ void renderWifiDelete() {
 }
 
 void renderAbout() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("SOBRE");
   drawContentPanel(2, 22, 156, 89);
 
   display.setTextColor(TFT_WHITE, C_BG);
-  display.drawString("ES32Lab Eleicoes", 5, 27, 1);
+  display.drawString(fitText(String(APP_NAME), 24), 5, 27, 1);
   display.drawString("Versao: " + String(APP_VERSION), 5, 41, 1);
-  display.drawString("Build: " + String(APP_BUILD_DATE), 5, 55, 1);
+  display.drawString("Data: " + String(APP_VERSION_DATE), 5, 55, 1);
   display.drawString("LIB: " + String(ES32LAB_VERSION), 5, 69, 1);
   display.drawString("WiFi: " + String(ES_WIFI_VERSION), 5, 83, 1);
 
@@ -3560,6 +3674,7 @@ void drawCandidatePhoto(
 }
 
 void renderPhotoRace(uint8_t slot) {
+  serialUiDirty = true;
   RaceData race = raceCopy(slot);
 
   drawUiBackground();
@@ -3643,6 +3758,7 @@ void renderPhotoRace(uint8_t slot) {
 }
 
 void renderListRace(uint8_t slot) {
+  serialUiDirty = true;
   RaceData race = raceCopy(slot);
 
   drawUiBackground();
@@ -3715,6 +3831,7 @@ String workerText() {
 }
 
 void renderResultStatus() {
+  serialUiDirty = true;
   drawUiBackground();
   drawHeader("STATUS");
   drawContentPanel(2, 22, 156, 89);
@@ -4421,6 +4538,1305 @@ void handleInput() {
 }
 
 // ============================================================
+// INTERFACE DE TERMINAL SERIAL
+// ============================================================
+//
+// Padrao de navegacao:
+//   1..N = opcao da tela
+//   0    = voltar/cancelar
+//   Enter confirma a opcao digitada
+//
+// A unica entrada livre de texto e a senha Wi-Fi.
+// O Terminal Serial e uma segunda interface para a mesma aplicacao;
+// ele nao possui uma maquina de estados eleitoral separada.
+//
+void serialLine() {
+  Serial.println("================================================");
+}
+
+void serialTitle(const String& title) {
+  Serial.println();
+  serialLine();
+  Serial.print(" ");
+  Serial.println(title);
+  serialLine();
+}
+
+void serialPrompt() {
+  Serial.println();
+  Serial.print("> ");
+}
+
+void serialInvalid(const String& message = "Opcao invalida.") {
+  Serial.println();
+  Serial.print("[AVISO] ");
+  Serial.println(message);
+  serialUiDirty = true;
+}
+
+bool parseSerialNumber(const String& value, int& number) {
+  if (value.length() == 0)
+    return false;
+
+  for (size_t i = 0; i < value.length(); i++) {
+    if (!isdigit(value[i]))
+      return false;
+  }
+
+  number = value.toInt();
+  return true;
+}
+
+void serialPrintUfs() {
+  serialTitle("SELECIONE A UF");
+
+  for (uint8_t i = 0; i < UF_COUNT; i++) {
+    Serial.print(i + 1);
+    Serial.print(" - ");
+    Serial.print(UFS[i].code);
+    Serial.print(" - ");
+    Serial.println(UFS[i].name);
+  }
+
+  Serial.println();
+  Serial.println("0 - Cancelar");
+  serialPrompt();
+}
+
+void serialPrintWifiDeleteSelection() {
+  serialTitle("EXCLUIR REDE WI-FI");
+
+  if (wifiCount == 0) {
+    Serial.println("Nenhuma rede salva.");
+    Serial.println("0 - Voltar");
+    serialPrompt();
+    return;
+  }
+
+  for (uint8_t i = 0; i < wifiCount; i++) {
+    Serial.print(i + 1);
+    Serial.print(" - ");
+    Serial.println(wifiList[i].ssid);
+  }
+
+  Serial.println();
+  Serial.println("0 - Cancelar");
+  serialPrompt();
+}
+
+void serialRenderRace() {
+  uint8_t pages = resultPageCount();
+
+  if (resultPage >= pages)
+    resultPage = 0;
+
+  if (resultPageIsStatus(resultPage)) {
+    serialTitle("STATUS");
+
+    Serial.print("Wi-Fi: ");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("CONECTADO - ");
+      Serial.println(WiFi.SSID());
+      Serial.print("IP: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("OFFLINE");
+    }
+
+    Serial.print("Eleicao: ");
+    Serial.print(APP_ELECTION_YEAR);
+    Serial.print(" | Turno ");
+    Serial.print(activeRound);
+    Serial.print(" | UF ");
+    Serial.println(UFS[activeUf].code);
+
+    Serial.print("Data/Hora: ");
+    Serial.print(dateText());
+    Serial.print(" ");
+    Serial.println(clockText());
+
+    Serial.print("Intervalo TSE: ");
+    Serial.print(POLL_OPTIONS_MS[pollOptionIndex] / 1000UL);
+    Serial.println(" s");
+
+    Serial.print("Worker: ");
+    Serial.println(workerText());
+
+    Serial.print("LittleFS: ");
+    Serial.println(littleFsReady ? "OK" : "FALHA");
+
+    Serial.print("RAM livre: ");
+    Serial.print(ESP.getFreeHeap() / 1024UL);
+    Serial.println(" KB");
+
+    Serial.print("Versao: ");
+    Serial.println(APP_VERSION);
+    Serial.print("Data da versao: ");
+    Serial.println(APP_VERSION_DATE);
+
+    Serial.println();
+    Serial.println("1 - Tela anterior");
+    Serial.println("2 - Proxima tela");
+    Serial.println("3 - Atualizar agora");
+    Serial.println("0 - Menu principal");
+    serialPrompt();
+    return;
+  }
+
+  uint8_t slot = raceSlotForPage(resultPage);
+  RaceData race = raceCopy(slot);
+
+  String title = race.shortTitle.length()
+    ? race.shortTitle
+    : titleForSlot(slot, activeUf);
+
+  serialTitle(title);
+
+  if (!race.hasData || race.candidateCount == 0) {
+    Serial.println(
+      refreshRunning
+        ? "Atualizando dados do TSE..."
+        : "Aguardando dados do TSE..."
+    );
+
+    if (race.error.length()) {
+      Serial.print("Estado: ");
+      Serial.println(race.error);
+    }
+
+    Serial.print("HTTP: ");
+    Serial.println(race.httpCode);
+  }
+  else {
+    Serial.print("Apuracao: ");
+    Serial.print(race.sectionPercent);
+    Serial.println("%");
+
+    if (race.time.length()) {
+      Serial.print("Horario TSE: ");
+      Serial.println(race.time);
+    }
+
+    if (!race.countStarted) {
+      Serial.println(
+        "A apuracao ainda nao foi iniciada. "
+        "A ordem recebida nao representa classificacao."
+      );
+    }
+
+    if (photosForSlot(slot)) {
+      uint8_t index = race.selected;
+
+      if (index >= race.candidateCount)
+        index = 0;
+
+      Candidate& c = race.candidates[index];
+
+      Serial.println();
+      Serial.print("Candidato ");
+      Serial.print(index + 1);
+      Serial.print(" de ");
+      Serial.println(race.candidateCount);
+
+      Serial.print("Nome: ");
+      Serial.println(c.name);
+
+      Serial.print("Numero/Partido: ");
+      Serial.print(c.number);
+      Serial.print(" / ");
+      Serial.println(c.party);
+
+      Serial.print("Percentual: ");
+      Serial.print(c.percentage);
+      Serial.println("%");
+
+      Serial.print("Votos: ");
+      Serial.println(formatVotes(c.votes));
+    }
+    else {
+      Serial.println();
+
+      uint8_t visibleRows =
+        race.countStarted ? 5 : 4;
+
+      for (uint8_t row = 0; row < visibleRows; row++) {
+        uint8_t index =
+          race.scroll + row;
+
+        if (index >= race.candidateCount)
+          break;
+
+        Candidate& c =
+          race.candidates[index];
+
+        Serial.print(index + 1);
+        Serial.print(" - ");
+        Serial.print(c.name);
+        Serial.print(" | ");
+        Serial.print(c.percentage);
+        Serial.println("%");
+      }
+    }
+  }
+
+  Serial.println();
+  Serial.println("1 - Tela anterior");
+  Serial.println("2 - Proxima tela");
+  Serial.println("3 - Atualizar agora");
+
+  if (race.hasData && race.candidateCount > 0) {
+    Serial.println("4 - Item anterior");
+    Serial.println("5 - Proximo item");
+  }
+
+  Serial.println("0 - Menu principal");
+  serialPrompt();
+}
+
+void serialRenderCurrentView() {
+  // Estados temporarios da inicializacao possuem prioridade sobre view.
+  if (startupSplashActive) {
+    serialTitle("ES32Lab ELEICOES");
+    Serial.println("Inicializando sistema...");
+    Serial.println("Aguarde.");
+    return;
+  }
+
+  if (startupPresentationActive) {
+    serialTitle("ELEICOES 2026 NA ES32Lab");
+    Serial.print("Versao: ");
+    Serial.println(APP_VERSION);
+    Serial.print("Data: ");
+    Serial.println(APP_VERSION_DATE);
+    Serial.println("Preparando conexao e servicos...");
+    return;
+  }
+
+  if (wifiSuccessActive) {
+    serialTitle("WI-FI CONECTADO");
+    Serial.print("SSID: ");
+    Serial.println(wifiSuccessSsid);
+    Serial.print("IP: ");
+    Serial.println(wifiSuccessIp);
+    Serial.println("Retornando ao menu...");
+    return;
+  }
+
+  if (serialInputMode == SERIAL_INPUT_UF_SELECT) {
+    serialPrintUfs();
+    return;
+  }
+
+  if (serialInputMode == SERIAL_INPUT_WIFI_DELETE_SELECT) {
+    serialPrintWifiDeleteSelection();
+    return;
+  }
+
+  if (view == VIEW_PASSWORD ||
+      serialInputMode == SERIAL_INPUT_PASSWORD) {
+    serialTitle("SENHA WI-FI");
+    Serial.print("SSID: ");
+    Serial.println(passwordSsid);
+    Serial.println();
+    Serial.println(
+      "Digite a senha completa e pressione Enter."
+    );
+    Serial.println("0 - Cancelar");
+    serialPrompt();
+    return;
+  }
+
+  switch (view) {
+    case VIEW_MAIN:
+      serialTitle("MENU PRINCIPAL");
+      Serial.println("1 - Iniciar Resultados");
+      Serial.println("2 - Eleicao");
+      Serial.println("3 - Configuracoes");
+      Serial.println();
+      Serial.print("Selecao atual: ");
+      Serial.print(APP_ELECTION_YEAR);
+      Serial.print(" | Turno ");
+      Serial.print(activeRound);
+      Serial.print(" | ");
+      Serial.println(UFS[activeUf].code);
+      serialPrompt();
+      break;
+
+    case VIEW_ELECTION: {
+      serialTitle(
+        "ELEICAO " +
+        String(APP_ELECTION_YEAR)
+      );
+
+      ElectionProfile p;
+      bool round2Available =
+        getElectionProfile(
+          APP_ELECTION_YEAR,
+          p
+        ) &&
+        secondRoundAvailableForUf(
+          p,
+          editUf
+        );
+
+      Serial.print("Turno: ");
+      Serial.println(editRound);
+
+      Serial.print("UF: ");
+      Serial.print(UFS[editUf].code);
+      Serial.print(" - ");
+      Serial.println(UFS[editUf].name);
+
+      Serial.print("Turno 2: ");
+      Serial.println(
+        round2Available
+          ? "DISPONIVEL"
+          : "INDISPONIVEL"
+      );
+
+      Serial.println();
+      Serial.println("1 - Alterar turno");
+      Serial.println("2 - Selecionar UF");
+      Serial.println("3 - Salvar e iniciar");
+
+      if (profileWasSaved)
+        Serial.println("0 - Voltar");
+
+      serialPrompt();
+      break;
+    }
+
+    case VIEW_RESULTS:
+      serialRenderRace();
+      break;
+
+    case VIEW_SETTINGS:
+      serialTitle("CONFIGURACOES");
+      Serial.println("1 - Wi-Fi");
+      Serial.println("2 - Intervalo TSE");
+      Serial.println("3 - Atualizar Sistema");
+      Serial.println("4 - Limpar Cache");
+      Serial.println("5 - Sobre");
+      Serial.println("0 - Voltar");
+      serialPrompt();
+      break;
+
+    case VIEW_WIFI: {
+      serialTitle("WI-FI");
+
+      Serial.print("Estado: ");
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.print("CONECTADO - ");
+        Serial.println(WiFi.SSID());
+      }
+      else if (wifiConnecting) {
+        Serial.println("CONECTANDO...");
+      }
+      else {
+        Serial.println("DESCONECTADO");
+      }
+
+      Serial.println();
+
+      for (uint8_t i = 0; i < wifiCount; i++) {
+        Serial.print(i + 1);
+        Serial.print(" - Conectar: ");
+        Serial.print(wifiList[i].ssid);
+
+        if (
+          WiFi.status() == WL_CONNECTED &&
+          WiFi.SSID() == wifiList[i].ssid
+        ) {
+          Serial.print(" [ATUAL]");
+        }
+
+        Serial.println();
+      }
+
+      uint8_t searchOption = wifiCount + 1;
+      uint8_t deleteOption = wifiCount + 2;
+
+      Serial.print(searchOption);
+      Serial.println(" - Buscar nova rede");
+
+      if (wifiCount > 0) {
+        Serial.print(deleteOption);
+        Serial.println(" - Excluir rede salva");
+      }
+
+      Serial.println("0 - Voltar");
+      serialPrompt();
+      break;
+    }
+
+    case VIEW_WIFI_SCAN: {
+      serialTitle("BUSCAR WI-FI");
+
+      if (!scanReady) {
+        Serial.println("Buscando redes...");
+        Serial.println("0 - Voltar");
+        serialPrompt();
+        break;
+      }
+
+      uint8_t localCount;
+      ScannedNetwork local[MAX_SCAN_NETWORKS];
+
+      xSemaphoreTake(
+        scanMutex,
+        portMAX_DELAY
+      );
+
+      localCount = scanCount;
+
+      for (
+        uint8_t i = 0;
+        i < localCount;
+        i++
+      ) {
+        local[i] = scanList[i];
+      }
+
+      xSemaphoreGive(scanMutex);
+
+      if (localCount == 0) {
+        Serial.println(
+          "Nenhuma rede encontrada."
+        );
+      }
+      else {
+        for (
+          uint8_t i = 0;
+          i < localCount;
+          i++
+        ) {
+          Serial.print(i + 1);
+          Serial.print(" - ");
+          Serial.print(local[i].ssid);
+          Serial.print(" | RSSI ");
+          Serial.print(local[i].rssi);
+          Serial.print("%");
+
+          if (local[i].secure)
+            Serial.print(" | protegida");
+
+          Serial.println();
+        }
+      }
+
+      Serial.println("0 - Voltar");
+      serialPrompt();
+      break;
+    }
+
+    case VIEW_WIFI_DELETE:
+      serialTitle("CONFIRMAR EXCLUSAO");
+
+      if (wifiDeleteIndex < wifiCount) {
+        Serial.print("Rede: ");
+        Serial.println(
+          wifiList[wifiDeleteIndex].ssid
+        );
+      }
+
+      Serial.println("1 - Excluir");
+      Serial.println("0 - Cancelar");
+      serialPrompt();
+      break;
+
+    case VIEW_UPDATE_INTERVAL:
+      serialTitle("INTERVALO TSE");
+
+      for (
+        uint8_t i = 0;
+        i < POLL_OPTION_COUNT;
+        i++
+      ) {
+        Serial.print(i + 1);
+        Serial.print(" - ");
+        Serial.print(
+          POLL_OPTIONS_MS[i] / 1000UL
+        );
+        Serial.print(" segundos");
+
+        if (i == pollOptionIndex)
+          Serial.print(" [ATUAL]");
+
+        Serial.println();
+      }
+
+      Serial.println("0 - Voltar");
+      serialPrompt();
+      break;
+
+    case VIEW_SYSTEM_UPDATE:
+      serialTitle("ATUALIZACAO");
+
+      Serial.print("Instalada: ");
+      Serial.println(APP_VERSION);
+
+      Serial.print("Disponivel: ");
+      Serial.println(
+        otaAvailableVersion.length()
+          ? otaAvailableVersion
+          : "--"
+      );
+
+      if (otaUiState == OTA_UI_CHECKING) {
+        Serial.println(
+          "Consultando atualizacao..."
+        );
+      }
+      else if (
+        otaUiState == OTA_UI_AVAILABLE
+      ) {
+        Serial.println(
+          "Nova versao disponivel."
+        );
+
+        if (otaRemoteSize > 0) {
+          Serial.print("Tamanho: ");
+          Serial.print(
+            otaRemoteSize / 1024UL
+          );
+          Serial.println(" KB");
+        }
+
+        Serial.println("1 - Atualizar agora");
+      }
+      else if (
+        otaUiState == OTA_UI_CURRENT
+      ) {
+        Serial.println(
+          "Sistema atualizado."
+        );
+        Serial.println(
+          "1 - Verificar novamente"
+        );
+      }
+      else if (
+        otaUiState == OTA_UI_ERROR
+      ) {
+        Serial.print("Erro: ");
+        Serial.println(
+          otaMessage.length()
+            ? otaMessage
+            : "Falha ao consultar"
+        );
+        Serial.println("1 - Tentar novamente");
+      }
+      else if (
+        otaUiState == OTA_UI_INSTALLING
+      ) {
+        Serial.print("Instalando: ");
+        Serial.print(
+          max(0, otaLastProgress)
+        );
+        Serial.println("%");
+      }
+      else {
+        Serial.println(
+          "1 - Verificar nova versao"
+        );
+      }
+
+      if (
+        otaUiState != OTA_UI_INSTALLING
+      ) {
+        Serial.println("0 - Voltar");
+      }
+
+      serialPrompt();
+      break;
+
+    case VIEW_CACHE_CONFIRM:
+      serialTitle("LIMPAR CACHE");
+      Serial.println(
+        "Apagar fotografias armazenadas?"
+      );
+      Serial.println("1 - Sim");
+      Serial.println("0 - Cancelar");
+      serialPrompt();
+      break;
+
+    case VIEW_ABOUT:
+      serialTitle("SOBRE");
+      Serial.println(APP_NAME);
+      Serial.print("Versao: ");
+      Serial.println(APP_VERSION);
+      Serial.print("Data: ");
+      Serial.println(APP_VERSION_DATE);
+      Serial.print("LIB ES32Lab: ");
+      Serial.println(ES32LAB_VERSION);
+      Serial.print("ES_Wifi: ");
+      Serial.println(ES_WIFI_VERSION);
+      Serial.println("Dados eleitorais: TSE");
+      Serial.println("Site: www.esdeveloper.com.br");
+      Serial.println();
+      Serial.println("0 - Voltar");
+      serialPrompt();
+      break;
+
+    default:
+      break;
+  }
+}
+
+void serialOpenWifiScanSelection(int option) {
+  if (!scanReady) {
+    serialInvalid(
+      "A busca de redes ainda nao terminou."
+    );
+    return;
+  }
+
+  uint8_t localCount;
+  ScannedNetwork local[MAX_SCAN_NETWORKS];
+
+  xSemaphoreTake(
+    scanMutex,
+    portMAX_DELAY
+  );
+
+  localCount = scanCount;
+
+  for (
+    uint8_t i = 0;
+    i < localCount;
+    i++
+  ) {
+    local[i] = scanList[i];
+  }
+
+  xSemaphoreGive(scanMutex);
+
+  if (
+    option < 1 ||
+    option > localCount
+  ) {
+    serialInvalid();
+    return;
+  }
+
+  uint8_t index = option - 1;
+  scanIndex = index;
+
+  passwordSsid = local[index].ssid;
+  passwordSecure = local[index].secure;
+  passwordValue = "";
+  passwordGroup = 0;
+  passwordCharIndex = 0;
+  passwordHasPendingChar = false;
+
+  if (!passwordSecure) {
+    addOrUpdateWifi(
+      passwordSsid,
+      ""
+    );
+
+    requestManualWifi(
+      passwordSsid,
+      ""
+    );
+
+    view = VIEW_WIFI;
+    wifiMenuIndex = 0;
+    serialInputMode =
+      SERIAL_INPUT_NORMAL;
+
+    renderWifiMenu();
+    return;
+  }
+
+  view = VIEW_PASSWORD;
+  serialInputMode =
+    SERIAL_INPUT_PASSWORD;
+
+  renderPassword();
+}
+
+void serialBackFromSystemUpdate() {
+  otaModeActive = false;
+
+  if (otaEnteredFromStartup) {
+    otaEnteredFromStartup = false;
+
+    if (profileWasSaved) {
+      view = VIEW_MAIN;
+      menuIndex = 0;
+    }
+    else {
+      beginElectionEditor();
+      view = VIEW_ELECTION;
+    }
+
+    renderCurrentView();
+
+    if (
+      WiFi.status() ==
+      WL_CONNECTED
+    ) {
+      catalogRequested = true;
+      refreshRequested = true;
+    }
+
+    pollTimer.resetMillis();
+    return;
+  }
+
+  view = VIEW_SETTINGS;
+  renderSettings();
+}
+
+void handleSerialNormalOption(int option) {
+  switch (view) {
+    case VIEW_MAIN:
+      if (option == 1) {
+        view = VIEW_RESULTS;
+        resultPage = 0;
+        refreshRequested = true;
+        renderResults();
+      }
+      else if (option == 2) {
+        beginElectionEditor();
+        view = VIEW_ELECTION;
+        renderElectionEditor();
+      }
+      else if (option == 3) {
+        settingsIndex = 0;
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_ELECTION:
+      if (option == 0) {
+        if (!profileWasSaved) {
+          serialInvalid(
+            "Salve a eleicao antes de sair."
+          );
+          return;
+        }
+
+        view = VIEW_MAIN;
+        menuIndex = 0;
+        renderMain();
+      }
+      else if (option == 1) {
+        ElectionProfile p;
+
+        if (
+          getElectionProfile(
+            APP_ELECTION_YEAR,
+            p
+          ) &&
+          secondRoundAvailableForUf(
+            p,
+            editUf
+          )
+        ) {
+          editRound =
+            editRound == 1 ? 2 : 1;
+        }
+        else {
+          editRound = 1;
+        }
+
+        renderElectionEditor();
+      }
+      else if (option == 2) {
+        serialInputMode =
+          SERIAL_INPUT_UF_SELECT;
+        serialUiDirty = true;
+      }
+      else if (option == 3) {
+        activateSelection(
+          editRound,
+          editUf
+        );
+
+        serialInputMode =
+          SERIAL_INPUT_NORMAL;
+
+        view = VIEW_RESULTS;
+        resultPage = 0;
+        renderResults();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_RESULTS: {
+      uint8_t pages = resultPageCount();
+
+      if (option == 0) {
+        view = VIEW_MAIN;
+        menuIndex = 0;
+        renderMain();
+      }
+      else if (option == 1) {
+        resultPage =
+          resultPage == 0
+            ? pages - 1
+            : resultPage - 1;
+        renderResults();
+      }
+      else if (option == 2) {
+        resultPage =
+          (resultPage + 1) % pages;
+        renderResults();
+      }
+      else if (option == 3) {
+        refreshRequested = true;
+        renderResults();
+      }
+      else if (
+        (option == 4 || option == 5) &&
+        !resultPageIsStatus(resultPage)
+      ) {
+        uint8_t slot =
+          raceSlotForPage(resultPage);
+
+        changeRaceSelection(
+          slot,
+          option == 4 ? -1 : +1
+        );
+
+        renderResults();
+      }
+      else {
+        serialInvalid();
+      }
+
+      break;
+    }
+
+    case VIEW_SETTINGS:
+      if (option == 0) {
+        view = VIEW_MAIN;
+        renderMain();
+      }
+      else if (option == 1) {
+        wifiMenuIndex = 0;
+        view = VIEW_WIFI;
+        renderWifiMenu();
+      }
+      else if (option == 2) {
+        view = VIEW_UPDATE_INTERVAL;
+        renderUpdateInterval();
+      }
+      else if (option == 3) {
+        otaEnteredFromStartup = false;
+        view = VIEW_SYSTEM_UPDATE;
+        otaUiState = OTA_UI_IDLE;
+        renderSystemUpdate();
+        checkFirmwareUpdate();
+      }
+      else if (option == 4) {
+        view = VIEW_CACHE_CONFIRM;
+        renderCacheConfirm();
+      }
+      else if (option == 5) {
+        view = VIEW_ABOUT;
+        renderAbout();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_WIFI: {
+      if (option == 0) {
+        view = VIEW_SETTINGS;
+        renderSettings();
+        break;
+      }
+
+      uint8_t searchOption =
+        wifiCount + 1;
+
+      uint8_t deleteOption =
+        wifiCount + 2;
+
+      if (
+        option >= 1 &&
+        option <= wifiCount
+      ) {
+        uint8_t index =
+          option - 1;
+
+        wifiMenuIndex = index;
+
+        requestManualWifi(
+          wifiList[index].ssid,
+          wifiList[index].password
+        );
+
+        renderWifiMenu();
+      }
+      else if (
+        option == searchOption
+      ) {
+        scanIndex = 0;
+        scanReady = false;
+        scanRequested = true;
+        view = VIEW_WIFI_SCAN;
+        renderWifiScan();
+      }
+      else if (
+        wifiCount > 0 &&
+        option == deleteOption
+      ) {
+        serialInputMode =
+          SERIAL_INPUT_WIFI_DELETE_SELECT;
+        serialUiDirty = true;
+      }
+      else {
+        serialInvalid();
+      }
+
+      break;
+    }
+
+    case VIEW_WIFI_SCAN:
+      if (option == 0) {
+        view = VIEW_WIFI;
+        serialInputMode =
+          SERIAL_INPUT_NORMAL;
+        renderWifiMenu();
+      }
+      else {
+        serialOpenWifiScanSelection(
+          option
+        );
+      }
+      break;
+
+    case VIEW_WIFI_DELETE:
+      if (option == 0) {
+        view = VIEW_WIFI;
+        renderWifiMenu();
+      }
+      else if (option == 1) {
+        deleteWifi(wifiDeleteIndex);
+
+        if (
+          wifiMenuIndex >=
+          wifiMenuItemCount()
+        ) {
+          wifiMenuIndex = 0;
+        }
+
+        view = VIEW_WIFI;
+        renderWifiMenu();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_UPDATE_INTERVAL:
+      if (option == 0) {
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else if (
+        option >= 1 &&
+        option <= POLL_OPTION_COUNT
+      ) {
+        pollOptionIndex =
+          option - 1;
+
+        savePollSetting();
+        pollTimer.resetMillis();
+
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_SYSTEM_UPDATE:
+      if (
+        otaUiState ==
+        OTA_UI_INSTALLING
+      ) {
+        serialInvalid(
+          "Atualizacao em andamento."
+        );
+        return;
+      }
+
+      if (option == 0) {
+        serialBackFromSystemUpdate();
+      }
+      else if (option == 1) {
+        if (
+          otaUiState ==
+          OTA_UI_AVAILABLE
+        ) {
+          installFirmwareUpdate();
+        }
+        else {
+          checkFirmwareUpdate();
+        }
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_CACHE_CONFIRM:
+      if (option == 0) {
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else if (option == 1) {
+        clearPhotoCache();
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_ABOUT:
+      if (option == 0 ||
+          option == 1) {
+        view = VIEW_SETTINGS;
+        renderSettings();
+      }
+      else {
+        serialInvalid();
+      }
+      break;
+
+    case VIEW_PASSWORD:
+      // Tratado como texto em handleSerialLine().
+      serialInvalid(
+        "Digite a senha completa."
+      );
+      break;
+  }
+}
+
+void handleSerialLine(String line) {
+  // Durante splash/apresentacao, os comandos nao devem alterar
+  // o estado da aplicacao.
+  if (
+    startupSplashActive ||
+    startupPresentationActive ||
+    wifiSuccessActive
+  ) {
+    Serial.println();
+    Serial.println(
+      "[AVISO] Aguarde a inicializacao."
+    );
+    return;
+  }
+
+  if (
+    view == VIEW_PASSWORD ||
+    serialInputMode ==
+      SERIAL_INPUT_PASSWORD
+  ) {
+    if (line == "0") {
+      serialInputMode =
+        SERIAL_INPUT_NORMAL;
+
+      view = VIEW_WIFI_SCAN;
+      renderWifiScan();
+      return;
+    }
+
+    if (line.length() == 0) {
+      serialInvalid(
+        "A senha nao pode ser vazia nesta rede."
+      );
+      return;
+    }
+
+    if (line.length() > 63) {
+      serialInvalid(
+        "Senha muito longa."
+      );
+      return;
+    }
+
+    passwordValue = line;
+    passwordHasPendingChar = false;
+
+    addOrUpdateWifi(
+      passwordSsid,
+      passwordValue
+    );
+
+    requestManualWifi(
+      passwordSsid,
+      passwordValue
+    );
+
+    wifiMenuIndex = 0;
+    serialInputMode =
+      SERIAL_INPUT_NORMAL;
+
+    view = VIEW_WIFI;
+    renderWifiMenu();
+    return;
+  }
+
+  line.trim();
+
+  int option = -1;
+
+  if (!parseSerialNumber(
+        line,
+        option
+      )) {
+    serialInvalid(
+      "Use apenas o numero da opcao e Enter."
+    );
+    return;
+  }
+
+  if (
+    serialInputMode ==
+    SERIAL_INPUT_UF_SELECT
+  ) {
+    if (option == 0) {
+      serialInputMode =
+        SERIAL_INPUT_NORMAL;
+      renderElectionEditor();
+      return;
+    }
+
+    if (
+      option < 1 ||
+      option > UF_COUNT
+    ) {
+      serialInvalid();
+      return;
+    }
+
+    editUf = option - 1;
+
+    ElectionProfile p;
+
+    if (
+      getElectionProfile(
+        APP_ELECTION_YEAR,
+        p
+      ) &&
+      editRound == 2 &&
+      !secondRoundAvailableForUf(
+        p,
+        editUf
+      )
+    ) {
+      editRound = 1;
+    }
+
+    serialInputMode =
+      SERIAL_INPUT_NORMAL;
+
+    renderElectionEditor();
+    return;
+  }
+
+  if (
+    serialInputMode ==
+    SERIAL_INPUT_WIFI_DELETE_SELECT
+  ) {
+    if (option == 0) {
+      serialInputMode =
+        SERIAL_INPUT_NORMAL;
+      renderWifiMenu();
+      return;
+    }
+
+    if (
+      option < 1 ||
+      option > wifiCount
+    ) {
+      serialInvalid();
+      return;
+    }
+
+    wifiDeleteIndex =
+      option - 1;
+
+    serialInputMode =
+      SERIAL_INPUT_NORMAL;
+
+    view = VIEW_WIFI_DELETE;
+    renderWifiDelete();
+    return;
+  }
+
+  handleSerialNormalOption(option);
+}
+
+void serviceSerialInput() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\r' || c == '\n') {
+      if (serialInputBuffer.length() > 0) {
+        String line =
+          serialInputBuffer;
+
+        serialInputBuffer = "";
+
+        handleSerialLine(line);
+      }
+
+      continue;
+    }
+
+    // Protege contra linhas acidentalmente enormes.
+    if (serialInputBuffer.length() < 96) {
+      serialInputBuffer += c;
+    }
+  }
+}
+
+void serviceSerialUi() {
+  if (view != serialLastView) {
+    serialLastView = view;
+
+    if (view == VIEW_PASSWORD) {
+      serialInputMode =
+        SERIAL_INPUT_PASSWORD;
+    }
+    else if (
+      serialInputMode !=
+        SERIAL_INPUT_UF_SELECT &&
+      serialInputMode !=
+        SERIAL_INPUT_WIFI_DELETE_SELECT
+    ) {
+      serialInputMode =
+        SERIAL_INPUT_NORMAL;
+    }
+
+    serialUiDirty = true;
+  }
+
+  if (!serialUiDirty)
+    return;
+
+  serialUiDirty = false;
+  serialRenderCurrentView();
+}
+
+
+// ============================================================
 // PRE-CACHE OPORTUNISTA
 // ============================================================
 
@@ -4646,22 +6062,27 @@ void setup() {
   expander.digitalWrite(EX1, LOW);
 
   Serial.begin(115200);
+  serialUiDirty = true;
 
   Serial.println();
-  Serial.println("========================================");
-  Serial.println(APP_NAME);
-  Serial.print("Versao: ");
-  Serial.println(APP_VERSION);
-  Serial.print("Build: ");
-  Serial.println(APP_BUILD_DATE);
-  Serial.print("LIB ES32Lab: ");
-  Serial.println(ES32LAB_VERSION);
-  Serial.print("ES_WiFi: ");
-  Serial.println(ES_WIFI_VERSION);
-  Serial.print("PCF8574 onboard: ");
-  Serial.println(expanderReady ? "OK" : "FALHA");
-  Serial.println("LED EX0/EX1: OFF");
-  Serial.println("========================================");
+  Serial.println(String(APP_NAME) + " - Terminal Serial");
+  Serial.println("Navegacao: digite o numero da opcao + Enter.");
+
+  DBG_PRINTLN();
+  DBG_PRINTLN("========================================");
+  DBG_PRINTLN(APP_NAME);
+  DBG_PRINT("Versao: ");
+  DBG_PRINTLN(APP_VERSION);
+  DBG_PRINT("Data: ");
+  DBG_PRINTLN(APP_VERSION_DATE);
+  DBG_PRINT("LIB ES32Lab: ");
+  DBG_PRINTLN(ES32LAB_VERSION);
+  DBG_PRINT("ES_WiFi: ");
+  DBG_PRINTLN(ES_WIFI_VERSION);
+  DBG_PRINT("PCF8574 onboard: ");
+  DBG_PRINTLN(expanderReady ? "OK" : "FALHA");
+  DBG_PRINTLN("LED EX0/EX1: OFF");
+  DBG_PRINTLN("========================================");
 
   raceMutex = xSemaphoreCreateMutex();
   catalogMutex = xSemaphoreCreateMutex();
@@ -4717,6 +6138,10 @@ void loop() {
   serviceWifiConnection();
   serviceWifiSuccessFlow();
   serviceStartupFlow();
+
+  // O Terminal Serial permanece disponivel durante toda a execucao.
+  // Durante as telas de abertura, comandos de navegacao sao apenas recusados.
+  serviceSerialInput();
 
   // Durante QR Code, apresentacao e confirmacao de Wi-Fi nao ha navegacao.
   // O teclado volta a atuar ao entrar no scanner ou no aplicativo.
@@ -4805,4 +6230,7 @@ void loop() {
     lastScanReady = scanReady;
     renderWifiScan();
   }
+
+  // Atualiza o espelho textual somente quando alguma tela mudou.
+  serviceSerialUi();
 }
