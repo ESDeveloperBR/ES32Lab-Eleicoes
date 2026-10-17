@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ES32Lab.h>
 #include <ES_Wifi.h>
+#include <ES_WifiScanService.h>
 #include "ESDeveloper_QR.h"
 #include "ES32Lab_Eleicoes_Splash.h"
 #include "ES32Lab_UI_Background.h"
@@ -98,8 +99,9 @@
 // 2.5.3 - Mantem apenas versao e data vindas do PlatformIO.
 //         O nome interno do firmware volta a ser constante local,
 //         evitando problemas com espacos/acentuacao em build_flags.
-// Atual - OTA adaptado ao manifesto atual: sem campo size e com
+// 2.5.4 - OTA adaptado ao manifesto atual: sem campo size e com
 //         firmware_sha256 opcional, validado antes de concluir a gravacao.
+// 2.5.6 - URL do manifest.json centralizada no platformio.ini.
 //
 // ============================================================
 
@@ -116,9 +118,10 @@ constexpr char DEFAULT_WIFI_SSID[] = "";
 constexpr char DEFAULT_WIFI_PASSWORD[] = "";
 
 // Distribuicao oficial / atualizacao OTA.
-constexpr char OTA_MANIFEST_URL[] =
-  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/"
-  "releases/latest/download/manifest.json";
+// O endereco do manifesto e fornecido pelo platformio.ini.
+#ifndef OTA_MANIFEST_URL
+#define OTA_MANIFEST_URL ""
+#endif
 
 // ============================================================
 // CONFIGURACAO ELEITORAL - ALTERAR AQUI NA PROXIMA ELEICAO GERAL
@@ -184,6 +187,7 @@ constexpr uint16_t C_SELECT = 0x10A5;
 
 ES_PCF8574 expander(0x20);
 ES_TFT display;
+ES_WifiScanService wifiScanner;
 ES_AnalogKeyboard keyboard(P_KEYBOARD);
 ES_TimeInterval pollTimer;
 ES_TimeInterval wifiAttemptTimer;
@@ -6334,6 +6338,7 @@ void setup() {
   expander.digitalWrite(EX1, LOW);
 
   Serial.begin(115200);
+  wifiScanner.begin(Serial);
   serialUiDirty = true;
 
   Serial.println();
