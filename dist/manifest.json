@@ -20,9 +20,9 @@
     "website":  "https://www.esdeveloper.com.br/",
     "repository":  "ESDeveloperBR/ES32Lab-Eleicoes",
     "firmware_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes.bin",
-    "firmware_sha256":  "a323bbac0b3ea2516c0551244742290d2ef0ebe20a9dfaaa69f5dce2a07597be",
+    "firmware_sha256":  "04fb3d05bb9ccc50edb429958f7d94d0cf8da42fcdc7c1eade5e0d5f7b66af3c",
     "data_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes-data.bin",
-    "data_sha256":  "617bdc835d748b2d03e9e4a52907bc2179435c969af6d061456c38fcd58f0b80",
+    "data_sha256":  "d65726d3198ef7e5a6bb4c3dffc5e2e185fab833a978c2c283160262f1a05a52",
     "full_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes-full.bin",
-    "full_sha256":  "e6d49d834c319495f88315058f69463ae55a050c19a5869ea10227238554a79d"
+    "full_sha256":  "b00c98e6c7af35e16b48773cf26b8d6235889306bce275e5b6759a6dd241b042"
 }
