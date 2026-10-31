@@ -1,10 +1,10 @@
 {
     "name":  "ES32Lab nas Eleições 2026",
     "developer":  "ES Developer",
-    "version":  "2.5.11",
+    "version":  "2.5.12",
     "version_date":  "2026-10-30",
     "description":  "Acompanhe dados públicos das Eleições 2026 disponibilizados pelo TSE diretamente na ES32Lab.",
-    "manifest_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/manifest.json",
+    "manifest_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/refs/heads/main/dist/manifest.json",
     "uses_wifi":  true,
     "keywords":  [
                      "ES32Lab",
@@ -20,9 +20,9 @@
     "website":  "https://www.esdeveloper.com.br/",
     "repository":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes",
     "firmware_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes.bin",
-    "firmware_sha256":  "3dfc5a9f97fb60d532fd9daa2af368fd5e6672ee7435860510fab2006a0f76c0",
+    "firmware_sha256":  "62dcf9e7e3893acd285545774fe15cc5d568081e561622161c353b9c64f3cec4",
     "data_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes-data.bin",
-    "data_sha256":  "06dab5f526d25d52449dadc7d7e885dd0fe988d425dc0bd2e3073713f97ef9cb",
+    "data_sha256":  "ed1a728a1b7842a7c93188fd5779914779cf7c50742e879b5b75edaa011632de",
     "full_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes-full.bin",
-    "full_sha256":  "d6f3eba25cbbb3a223ff3d3b6ff15dc611c110ea95ab516ac560cdbe1f1f0415"
+    "full_sha256":  "d475255368ba7ee4c0fd881e5b095812bf731dff6169b164c61484456f8985cf"
 }
