@@ -71,9 +71,9 @@ function PlatformIO {
   }
   throw "PlatformIO CLI nao encontrado."
 }
-function Exec([string]$cmd,[string[]]$args,[string]$label) {
+function Exec([string]$cmd,[string[]]$cliArgs,[string]$label) {
   Write-Host "[EXEC] $label"
-  & $cmd @args | Out-Host
+  & $cmd @cliArgs | Out-Host
   if($LASTEXITCODE -ne 0) { throw "$label falhou (codigo $LASTEXITCODE)." }
 }
 function Sha([string]$file) { return (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -151,7 +151,7 @@ function PrepareApp([string]$root,$ini,[string]$envName,$meta,[string]$repo,[str
       StageFile $dataFile (Join-Path $stage $names["data"])
     }
   }
-  if(PromptSN "Gerar imagem FULL de $envName?") {
+  if(PromptSN "Gerar imagem FULL de ${envName}?") {
     $names["full"]="$bn-full.bin"
     $fullOutput=Join-Path $stage $names["full"]
     FullImage $build $firmware $dataFile $fullOutput
@@ -266,7 +266,7 @@ function Publish([string]$root,[string]$repo,[string]$branch,[string]$version) {
     } else { Write-Host "Push nao realizado. Arquivos locais mantidos." }
   } finally { Pop-Location }
 }
-function Run($exe,$args,$label){ Exec $exe $args $label }
+function Run($exe,$cliArgs,$label){ Exec $exe $cliArgs $label }
 function Exe($names){ return FindCommand $names }
 function Num($v){$x=$v.Trim().ToLowerInvariant();if($x.StartsWith("0x")){return [Convert]::ToInt64($x.Substring(2),16)};if($x.EndsWith("k")){return [int64]([double]$x.TrimEnd("k")*1024)};if($x.EndsWith("m")){return [int64]([double]$x.TrimEnd("m")*1024*1024)};return [int64]$x}
 function Hex($n){return ("0x{0:X}"-f$n)}
@@ -359,7 +359,7 @@ try {
     else { $selected=@($envs); if($selected.Count -gt 1) { throw "Modo simples tem varios ambientes. Defina default_envs." } }
     if($selected.Count -ne 1) { throw "Modo simples requer exatamente um ambiente." }
   }
-  Title "ES Developer - Publicar Apps v1.0.0"
+  Title "ES Developer - Publicar Apps v1.0.3"
   Write-Host "Modo: $(if($script:isComposite){'Composto'}else{'Simples'})"
   Write-Host "Repositorio: $pubRepo"
   Write-Host "Branch: $branch"

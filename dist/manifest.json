@@ -1,7 +1,7 @@
 {
     "name":  "ES32Lab nas Eleições 2026",
     "developer":  "ES Developer",
-    "version":  "2.5.12",
+    "version":  "2.5.13",
     "version_date":  "2026-10-30",
     "description":  "Acompanhe dados públicos das Eleições 2026 disponibilizados pelo TSE diretamente na ES32Lab.",
     "manifest_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/refs/heads/main/dist/manifest.json",
@@ -18,11 +18,11 @@
     "thumbnail_url":  "https://images.tcdn.com.br/img/editor/up/1273877/abertura_oficial_6ac66675cd75d.jpg",
     "video_url":  "https://www.youtube.com/watch?v=U_iIK7eju4Y\u0026list=PLpVVewmHgD_LDEXAvsAxDWjS-3XCfZlZi",
     "website":  "https://www.esdeveloper.com.br/",
-    "repository":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes",
-    "firmware_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes.bin",
-    "firmware_sha256":  "62dcf9e7e3893acd285545774fe15cc5d568081e561622161c353b9c64f3cec4",
-    "data_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes-data.bin",
-    "data_sha256":  "ed1a728a1b7842a7c93188fd5779914779cf7c50742e879b5b75edaa011632de",
-    "full_url":  "https://github.com/ESDeveloperBR/ES32Lab-Eleicoes/releases/latest/download/es32lab_eleicoes-full.bin",
-    "full_sha256":  "d475255368ba7ee4c0fd881e5b095812bf731dff6169b164c61484456f8985cf"
+    "repository":  "ESDeveloperBR/ES32Lab-Eleicoes",
+    "firmware_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes.bin",
+    "firmware_sha256":  "e7a96cfe17558446fd5e40fdbe3472ec7daa4364e7cdec9499bc6b3019469d11",
+    "data_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes-data.bin",
+    "data_sha256":  "14376b004c390565b3070e649abe614cf68e16bbf5a57d477de79df3ceb1622b",
+    "full_url":  "https://raw.githubusercontent.com/ESDeveloperBR/ES32Lab-Eleicoes/main/dist/es32lab_eleicoes-full.bin",
+    "full_sha256":  "4b990c74ce69d448e9339dbdb85921672c7d3522ab19de35e59856d1b8be4276"
 }
