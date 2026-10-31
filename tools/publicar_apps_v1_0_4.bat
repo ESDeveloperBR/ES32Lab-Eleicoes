@@ -151,31 +151,35 @@ function PrepareApp([string]$root,$ini,[string]$envName,$meta,[string]$repo,[str
       StageFile $dataFile (Join-Path $stage $names["data"])
     }
   }
-  if(PromptSN "Gerar imagem FULL de ${envName}?") {
-    $names["full"]="$bn-full.bin"
-    $fullOutput=Join-Path $stage $names["full"]
-    FullImage $build $firmware $dataFile $fullOutput
-  }
+  # A imagem FULL e obrigatoria, inclusive quando nao existe diretorio data/.
+  $names["full"]="$bn-full.bin"
+  $fullOutput=Join-Path $stage $names["full"]
+  FullImage $build $firmware $dataFile $fullOutput
   $thumbName=""
-  foreach($ext in @(".jpg",".jpeg",".png")) {
-    $candidate=Join-Path $src "$bn-thumb$ext"
-    if(Test-Path -LiteralPath $candidate) { $thumbName="$bn-thumb$ext"; StageFile $candidate (Join-Path $stage $thumbName); break }
-  }
-  if(-not $thumbName) {
-    Write-Host "[AVISO] Thumbnail nao encontrada em $src"
-    if(PromptSN "Deseja informar a thumbnail manualmente?") {
-      while($true) {
-        $p=(Read-Host "Caminho da imagem (C cancela, Enter ignora)").Trim().Trim('"')
-        if($p.ToUpperInvariant() -in @("C","CANCELAR")) { StopUser }
-        if(-not $p) { break }
-        if(-not [IO.Path]::IsPathRooted($p)) { $p=Join-Path $src $p }
-        if((Test-Path -LiteralPath $p -PathType Leaf) -and $p -match '\.(jpg|jpeg|png)$') {
-          $ext=[IO.Path]::GetExtension($p).ToLowerInvariant()
-          $thumbName="$bn-thumb$ext"
-          StageFile $p (Join-Path $stage $thumbName)
-          break
+  $thumbUrl=Val $meta "thumbnail_url"
+  if($thumbUrl) {
+    Write-Host "[OK] thumbnail_url definida no platformio.ini; procura local dispensada."
+  } else {
+    foreach($ext in @(".jpg",".jpeg",".png")) {
+      $candidate=Join-Path $src "$bn-thumb$ext"
+      if(Test-Path -LiteralPath $candidate) { $thumbName="$bn-thumb$ext"; StageFile $candidate (Join-Path $stage $thumbName); break }
+    }
+    if(-not $thumbName) {
+      Write-Host "[AVISO] Thumbnail nao encontrada em $src"
+      if(PromptSN "Deseja informar a thumbnail manualmente?") {
+        while($true) {
+          $p=(Read-Host "Caminho da imagem (C cancela, Enter ignora)").Trim().Trim('"')
+          if($p.ToUpperInvariant() -in @("C","CANCELAR")) { StopUser }
+          if(-not $p) { break }
+          if(-not [IO.Path]::IsPathRooted($p)) { $p=Join-Path $src $p }
+          if((Test-Path -LiteralPath $p -PathType Leaf) -and $p -match '\.(jpg|jpeg|png)$') {
+            $ext=[IO.Path]::GetExtension($p).ToLowerInvariant()
+            $thumbName="$bn-thumb$ext"
+            StageFile $p (Join-Path $stage $thumbName)
+            break
+          }
+          Write-Host "[AVISO] Informe um arquivo JPG, JPEG ou PNG existente."
         }
-        Write-Host "[AVISO] Informe um arquivo JPG, JPEG ou PNG existente."
       }
     }
   }
@@ -190,7 +194,6 @@ function PrepareApp([string]$root,$ini,[string]$envName,$meta,[string]$repo,[str
   if($wifi) { $m["uses_wifi"]=AsBool $wifi }
   $keywords=Val $meta "keywords"
   if($keywords) { $m["keywords"]=@($keywords -split ',' | ForEach-Object {$_.Trim()} | Where-Object {$_} | Select-Object -Unique) }
-  $thumbUrl=Val $meta "thumbnail_url"
   if(-not $thumbUrl -and $thumbName) { $thumbUrl=RawUrl $repo $branch $thumbName }
   AddIf $m "thumbnail_url" $thumbUrl
   foreach($field in @("video_url","website","repository")) { AddIf $m $field (Val $meta $field) }
@@ -359,7 +362,7 @@ try {
     else { $selected=@($envs); if($selected.Count -gt 1) { throw "Modo simples tem varios ambientes. Defina default_envs." } }
     if($selected.Count -ne 1) { throw "Modo simples requer exatamente um ambiente." }
   }
-  Title "ES Developer - Publicar Apps v1.0.3"
+  Title "ES Developer - Publicar Apps v1.0.4"
   Write-Host "Modo: $(if($script:isComposite){'Composto'}else{'Simples'})"
   Write-Host "Repositorio: $pubRepo"
   Write-Host "Branch: $branch"

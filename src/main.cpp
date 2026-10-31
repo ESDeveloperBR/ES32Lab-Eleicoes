@@ -6330,6 +6330,9 @@ void serviceStartupFlow() {
 // ============================================================
 
 void setup() {
+  Serial.begin(115200);
+  wifiScanner.begin(Serial);
+  
   // PRIMEIRA ACAO DO FIRMWARE:
   // inicializa o expansor I2C onboard e desliga os LEDs ligados a
   // EX0 (branco) e EX1 (laranja) o mais cedo possivel.
@@ -6337,8 +6340,6 @@ void setup() {
   expander.digitalWrite(EX0, LOW);
   expander.digitalWrite(EX1, LOW);
 
-  Serial.begin(115200);
-  wifiScanner.begin(Serial);
   serialUiDirty = true;
 
   Serial.println();
